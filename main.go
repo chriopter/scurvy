@@ -3,13 +3,12 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,17 +20,15 @@ import (
 
 var version = "dev"
 
-// dryRunEnv hands --dry-run on to `scurvy fix` started from the screen.
-const dryRunEnv = "SCURVY_DRY_RUN"
-
 const usage = `scurvy: which of your containers have scurvy?
 
   scurvy            the containers by stack; Enter updates
-  scurvy -n         the same, but Enter only shows what it would run
   scurvy list       the same as plain text
-  scurvy fix NAME   update one container (service or container name); -n shows only
+  scurvy fix NAME   update one container, or all of a stack's
   scurvy update     update scurvy itself
   scurvy version
+
+  -n, --dry-run     show every step of an update, run none
 
 Compose labels: scurvy.ignore=true leaves a container out,
 scurvy.due-after=7d sets how long its updates may wait.
@@ -46,30 +43,28 @@ func main() {
 		}
 		args = append(args, a)
 	}
-	if os.Getenv(dryRunEnv) == "1" {
-		fix.DryRun = true
-	}
-	if fix.DryRun {
-		os.Setenv(dryRunEnv, "1") // for `scurvy fix` started from the screen
-	}
 	cmd := ""
 	if len(args) > 0 {
 		cmd = args[0]
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	var err error
 	switch cmd {
 	case "":
+		host, _ := os.Hostname()
 		var restart string
-		if restart, err = tui.Run(version, fix.DryRun); err == nil && restart != "" {
+		if restart, err = tui.Run(ctx, host, version, fix.DryRun); err == nil && restart != "" {
 			fmt.Println("scurvy updated itself (signature checked); starting it again")
 			err = syscall.Exec(restart, os.Args, os.Environ())
 		}
 	case "list", "ls":
-		err = list()
+		err = list(ctx)
 	case "fix":
-		err = fixOne(args[1:])
+		err = fixNamed(ctx, args[1:])
 	case "update":
-		err = selfUpdate(false)
+		err = selfUpdate(ctx)
 	case "version", "--version", "-v":
 		fmt.Println("scurvy", version)
 	case "help", "--help", "-h":
@@ -78,118 +73,78 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
-	if errors.Is(err, errShown) {
-		os.Exit(1)
-	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scurvy:", err)
 		os.Exit(1)
 	}
 }
 
-// errShown is a failure already told on screen.
-var errShown = errors.New("shown")
-
-func list() error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+func list(ctx context.Context) error {
 	items, err := scan.Scan(ctx, nil)
 	if err != nil {
 		return err
 	}
 	for _, it := range items {
-		sign := it.Level.Word()
-		if it.Err != "" && it.Level == scan.OK {
-			sign = "unchecked"
+		state := it.Level.Word()
+		if it.Unchecked() {
+			state = "unchecked"
 		}
 		name := it.Name()
 		if it.Project.Name != "" && it.Project.Name != it.Service {
 			name = it.Project.Name + "/" + name
 		}
-		fmt.Printf("%-9s %-32s %-10s %s\n", sign, name, it.Source(), it.Image)
+		fmt.Printf("%-9s %-32s %-10s %s\n", state, name, it.Source(), it.Image)
 		for _, f := range it.Findings {
-			fmt.Printf("         · %s\n", f.Text)
+			fmt.Printf("          · %s\n", f.Text)
 		}
-		if it.Err != "" {
-			fmt.Printf("         · could not check: %s\n", it.Err)
+		for _, e := range it.Errs {
+			fmt.Printf("          ? %s\n", e)
 		}
 	}
 	return nil
 }
 
-// fixOne updates what the screen hands over (one container or a stack's),
-// or the container named on the command line.
-func fixOne(args []string) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	fromScreen := os.Getenv(tui.ItemEnv) != ""
-	var todo []scan.Item
-	switch {
-	case fromScreen:
-		raw := []byte(os.Getenv(tui.ItemEnv))
-		if err := json.Unmarshal(raw, &todo); err != nil {
-			var one scan.Item
-			if err := json.Unmarshal(raw, &one); err != nil {
-				return err
-			}
-			todo = []scan.Item{one}
-		}
-	case len(args) == 1:
-		items, err := scan.Scan(ctx, nil)
-		if err != nil {
-			return err
-		}
-		for _, c := range items {
-			if c.Service == args[0] || c.Container.Name == args[0] {
-				todo = append(todo, c)
-			}
-		}
-		switch len(todo) {
-		case 0:
-			return fmt.Errorf("no running container %s", args[0])
-		case 1:
-		default:
-			return fmt.Errorf("%s names more than one container; use the container name", args[0])
-		}
-	default:
+// fixNamed updates the container called NAME (its service or container
+// name), or all of a stack's that need it when NAME is a stack.
+func fixNamed(ctx context.Context, args []string) error {
+	if len(args) != 1 {
 		return errors.New("usage: scurvy fix NAME")
 	}
-
-	var failed error
-	for i, it := range todo {
-		if i > 0 {
-			fmt.Println()
-		}
-		rollback, err := fix.Run(ctx, it, os.Stdout)
-		if err == nil && fix.DryRun {
-			fmt.Printf("\n\033[33m· dry run: nothing was changed\033[0m\n")
-			continue
-		}
-		if err == nil {
-			fmt.Printf("\n\033[32m✓ %s is shipshape again\033[0m\n", it.Name())
-			fmt.Printf("\033[2m  if it misbehaves: %s\033[0m\n", rollback)
-			continue
-		}
-		fmt.Printf("\n\033[31m✗ %s: %v\033[0m\n", it.Name(), err)
-		failed = err
-		if ctx.Err() != nil {
-			break
-		}
-	}
-	err := failed
+	items, err := scan.Scan(ctx, nil)
 	if err != nil {
-		err = errShown
+		return err
 	}
-	if fromScreen {
-		fmt.Print("\n\033[2mpress enter to go back\033[0m")
-		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	var todo []scan.Item
+	for _, it := range items {
+		if it.Service == args[0] || it.Container.Name == args[0] {
+			todo = append(todo, it)
+		}
 	}
-	return err
+	if len(todo) == 0 {
+		for _, it := range items {
+			if it.Project.Name == args[0] && it.Level > scan.OK {
+				todo = append(todo, it)
+			}
+		}
+	}
+	if len(todo) == 0 {
+		return fmt.Errorf("no running container or stack with something to update called %s", args[0])
+	}
+	plans, refused := fix.Plans(todo)
+	if len(refused) > 0 {
+		return errors.New(strings.Join(refused, "; "))
+	}
+	for _, p := range plans {
+		if err := fix.Run(ctx, p, os.Stdout); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// selfUpdate installs the newest release; restart starts it right away.
-func selfUpdate(restart bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+// selfUpdate installs the newest release.
+func selfUpdate(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	rel, err := update.Latest(ctx)
 	if err != nil {
@@ -199,13 +154,13 @@ func selfUpdate(restart bool) error {
 		fmt.Println("scurvy", version, "is the newest")
 		return nil
 	}
-	path, err := update.Install(ctx, rel.Tag)
-	if err != nil {
+	if fix.DryRun {
+		fmt.Println("dry run: would install scurvy", rel.Tag)
+		return nil
+	}
+	if _, err := update.Install(ctx, rel.Tag); err != nil {
 		return err
 	}
 	fmt.Println("installed scurvy", rel.Tag, "(signature checked)")
-	if restart {
-		return syscall.Exec(path, os.Args, os.Environ())
-	}
 	return nil
 }

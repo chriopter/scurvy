@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,8 @@ const (
 	LabelService    = "com.docker.compose.service"
 	LabelWorkingDir = "com.docker.compose.project.working_dir"
 	LabelConfig     = "com.docker.compose.project.config_files"
+	LabelEnvFiles   = "com.docker.compose.project.environment_file"
+	LabelOneOff     = "com.docker.compose.oneoff"
 )
 
 // Container is a running container.
@@ -36,6 +39,10 @@ type Container struct {
 // containers started otherwise (docker run, other tools).
 func (c Container) Project() string { return c.Labels[LabelProject] }
 func (c Container) Service() string { return c.Labels[LabelService] }
+
+// OneOff reports a container of `docker compose run`: it carries its
+// service's labels, but `up` would not make it again.
+func (c Container) OneOff() bool { return strings.EqualFold(c.Labels[LabelOneOff], "true") }
 
 // Image is a local image.
 type Image struct {
@@ -158,26 +165,49 @@ func inspectImage(ctx context.Context, ref string) *Image {
 	}
 }
 
-// Project is how to address a compose project from the command line.
+// Project is how to address a compose project from the command line, as
+// it was started: its directory, compose files and --env-file files.
 type Project struct {
-	Name  string
-	Dir   string   // working directory
-	Files []string // compose files
+	Name     string
+	Dir      string   // working directory
+	Files    []string // compose files
+	EnvFiles []string // --env-file files, in order
 }
 
 // ProjectOf reads a container's compose labels.
 func ProjectOf(c Container) Project {
-	p := Project{Name: c.Project(), Dir: c.Labels[LabelWorkingDir]}
-	for _, f := range strings.Split(c.Labels[LabelConfig], ",") {
-		if f = strings.TrimSpace(f); f != "" {
-			p.Files = append(p.Files, f)
-		}
+	return Project{
+		Name:     c.Project(),
+		Dir:      c.Labels[LabelWorkingDir],
+		Files:    list(c.Labels[LabelConfig]),
+		EnvFiles: list(c.Labels[LabelEnvFiles]),
 	}
-	return p
 }
 
-// Args are the docker arguments that select the project.
+func list(label string) []string {
+	var out []string
+	for _, f := range strings.Split(label, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// Key tells projects apart: the same name started from other files is
+// another project.
+func (p Project) Key() string {
+	return strings.Join([]string{p.Name, p.Dir, strings.Join(p.Files, ","), strings.Join(p.EnvFiles, ",")}, "\x00")
+}
+
+// Args are the docker arguments that select the project. A project as
+// `docker compose` finds it by itself in its directory (named after it,
+// one compose file of a default name, no --env-file) needs none, and the
+// command run in its directory reads as one would type it.
 func (p Project) Args(sub ...string) []string {
+	if p.plain() {
+		return append([]string{"compose"}, sub...)
+	}
 	args := []string{"compose", "-p", p.Name}
 	if p.Dir != "" {
 		args = append(args, "--project-directory", p.Dir)
@@ -185,15 +215,33 @@ func (p Project) Args(sub ...string) []string {
 	for _, f := range p.Files {
 		args = append(args, "-f", f)
 	}
+	for _, f := range p.EnvFiles {
+		args = append(args, "--env-file", f)
+	}
 	return append(args, sub...)
+}
+
+func (p Project) plain() bool {
+	if p.Dir == "" || len(p.Files) != 1 || len(p.EnvFiles) > 0 ||
+		filepath.Dir(p.Files[0]) != p.Dir || filepath.Base(p.Dir) != p.Name {
+		return false
+	}
+	switch filepath.Base(p.Files[0]) {
+	case "compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml":
+		return true
+	}
+	return false
 }
 
 // Service is a service as compose resolves it.
 type Service struct {
 	Image string
 	Build *struct {
-		Context    string `json:"context"`
-		Dockerfile string `json:"dockerfile"`
+		Context    string             `json:"context"`
+		Dockerfile string             `json:"dockerfile"`
+		Inline     string             `json:"dockerfile_inline"`
+		Args       map[string]*string `json:"args"`
+		Target     string             `json:"target"`
 	}
 	Labels map[string]string
 }

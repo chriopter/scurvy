@@ -32,30 +32,24 @@ func less(a, b []int) bool {
 	return false
 }
 
-// newerTags finds, among tags, the newest version of the same shape as cur
-// (same number of parts, same v prefix) within cur's major version, and the
-// newest beyond it.
-func newerTags(tags []string, cur string) (minor, major string) {
+// newerTag finds, among tags, the newest version of the same shape as
+// cur (same number of parts, same v prefix) within cur's major version.
+// A new major is a decision of its own, not an update.
+func newerTag(tags []string, cur string) string {
 	c := numbers(cur)
 	v := strings.HasPrefix(cur, "v")
-	var bestMinor, bestMajor []int
+	var best []int
+	newest := ""
 	for _, t := range tags {
 		if !pinned(t) || strings.HasPrefix(t, "v") != v {
 			continue
 		}
 		n := numbers(t)
-		if len(n) != len(c) || !less(c, n) {
-			continue
-		}
-		if n[0] == c[0] {
-			if bestMinor == nil || less(bestMinor, n) {
-				bestMinor, minor = n, t
-			}
-		} else if bestMajor == nil || less(bestMajor, n) {
-			bestMajor, major = n, t
+		if len(n) == len(c) && n[0] == c[0] && less(c, n) && (best == nil || less(best, n)) {
+			best, newest = n, t
 		}
 	}
-	return minor, major
+	return newest
 }
 
 // majorOf is the start every newer version of the same major shares:
