@@ -8,23 +8,23 @@ program, no config, no daemon, nothing listening.
 
 ```
  🍋 scurvy   home-server  ·  9 containers
- ● 1 end of life    ● 1 overdue    ● 3 fresh    ● 4 healthy
-╭────────────────────────────────────────────────────────────────────────────────────────────╮
-│   CONTAINER         SOURCE     RUNNING            STATUS     FINDING                       │
-│ ────────────────────────────────────────────────────────────────────────────────────────── │
-│ ▌ worker            own build  built 41 days ago   EOL       alpine 3.19 is end of life  +1│
-│   shop              stack                          OVERDUE   3 containers · 2 to update    │
-│   ├ web             registry   latest              OVERDUE   new image, built 15 days ago  │
-│   └ db              pinned     16.4                FRESH     16.4 → 16.6, released 9 days …│
-│   proxy             registry   latest              FRESH     new image, built today        │
-│   + 4 healthy · a shows them                                                               │
-╰────────────────────────────────────────────────────────────────────────────────────────────╯
-╭────────────────────────────────────────────────────────────────────────────────────────────╮
-│ worker  worker-worker                                                                      │
-│ ● alpine 3.19 is end of life since 2025-11-01                                              │
-│ ● base alpine:3.19 → 3.24, released 25 days ago                                            │
-│ → Enter writes alpine:3.24 into Dockerfile.                                                │
-╰────────────────────────────────────────────────────────────────────────────────────────────╯
+ ✗ 1 eol    ! 1 overdue    ↑ 2 updates    ✓ 5 current
+╭──────────────────────────────────────────────────────────────────────────────────╮
+│     CONTAINER     VERSION          WAITS  WHAT                                   │
+│   ── shop ────────────────────────────────── 1 overdue · 1 update · 2 current ── │
+│ ▌ ! web       ↓  latest             15d  new image                               │
+│   ↑ db        #  16.4 → 16.6         9d  new version                             │
+│   ── standalone ──────────────────────────────── 1 eol · 1 update · 3 current ── │
+│   ✗ worker    ⚒  3.19 → 3.24        25d  alpine 3.19 end of life                 │
+│   ↑ proxy     ↓  latest              0d  new image                               │
+│   ── 5 more containers current · a shows them ────────────────────────────────── │
+╰──────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────────╮
+│ ! overdue  web  ghcr.io/acme/web:latest                                          │
+│ ↓ pulled from a registry                                                         │
+│ ! new image for latest, built 15 days ago                                        │
+│ ⏎ pulls and recreates                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────╯
  ↑/↓ move • enter update • a show all • r look again • u check scurvy • q quit
 ```
 
@@ -40,37 +40,103 @@ Then `scurvy`. When it starts it also looks for a newer scurvy in the
 background; if there is one, the top line says so and <kbd>u</kbd> installs it.
 <kbd>u</kbd> also looks again by hand.
 
-## What it finds
+## The screen
 
-It works everything out from the containers themselves: compose puts the
-project, the service and the compose files on every container it starts.
+Every container is **✓ current**, **↑ update** (something newer is there),
+**! overdue** (it has waited longer than its grace), **✗ eol** (its base gets
+no fixes any more) or **? unchecked** (the registry did not answer).
 
-| | how it knows | 🤒 fresh | 🤢 overdue |
-|---|---|---|---|
-| image with a moving tag (`latest`, `release`, `3.12-slim`) | the registry's digest for the tag differs from the running one | new image | after 14 days |
-| image with a pinned version (`10.11.11`) | the registry has a newer tag of the same major | newer version | after 90 days |
-| image built from a Dockerfile | build date, the base image's date, `git log` of the build context | newer base, newer code | build older than 30 days |
-| any of them | [endoflife.date](https://endoflife.date) for the base (alpine, debian, python, node, postgres, …) | | ☠ end of life |
+Containers of one compose project stand in a section of their own; those
+alone stand under *standalone*. The sign after a name says what kind of
+container it is, and that decides how scurvy checks it and what
+<kbd>Enter</kbd> runs. Nothing is pulled to check: scurvy asks the
+registries what a tag points to now.
 
-Nothing is pulled to check: scurvy asks the registries what a tag points to now.
+## By kind of container
 
-Containers of one compose project stand together under its name, as a tree. The
-SOURCE column says where an image comes from: `registry` (a moving tag),
-`pinned` (a fixed version), `digest`, `own build` (a Dockerfile of yours),
-`external` (started by another tool) or `docker run`.
+### ↓ Pulled, moving tag (`:latest`, `:release`, `:3.12-slim`)
 
-## What Enter does
+Checks: the registry's digest for the tag against the running image's;
+an image already pulled but not yet running. ↑ update, ! overdue after 14 days.
 
-On a stack's line, Enter updates its containers that need it, one after the other.
+```
+docker tag <running image> <image>:bak-<time>
+docker compose pull <service>
+docker compose up -d <service>
+docker image prune -f
+```
 
-1. A pinned version: writes the new one into the compose file or the Dockerfile, shown as a diff.
-2. Keeps the running image as `<image>:bak-<time>`; the two newest stay.
-3. `docker compose pull` or `docker compose build --pull` for that service.
-4. `docker compose up -d` for that service.
-5. Prints the one line that brings the old image back.
+### # Pulled, pinned version (`:16.4`, `:2.11.4`)
 
-Containers not started from a compose file (`docker run`, containers an
-all-in-one installer starts itself) are checked, not updated.
+Checks: the registry's tags for a newer one of the same major; a new major
+is only mentioned. ↑ update, ! overdue after 90 days.
+
+```
+<compose file>: postgres:16.4 → postgres:16.6   (shown as a diff)
+docker tag <running image> <image>:bak-<time>
+docker compose pull <service>
+docker compose up -d <service>
+docker image prune -f
+```
+
+### @ Pulled, pinned by digest
+
+Checks: only end of life. Enter does nothing: change the digest by hand.
+
+### ⚒ Own build (`build:` in the compose file)
+
+Checks: the build's age (! overdue after 30 days); a newer image behind a
+moving `FROM`; a newer version of a pinned `FROM`; `git log` of the build
+context newer than the build.
+
+```
+Dockerfile: FROM alpine:3.19 → FROM alpine:3.24   (pinned FROM only)
+docker tag <running image> <image>:bak-<time>
+docker compose build --pull <service>
+docker compose up -d <service>
+docker builder prune -f --max-used-space 10GB
+docker image prune -f
+```
+
+### ⚒ Own build from a git clone
+
+When the build context is a git clone of its own with an upstream, scurvy
+also asks the remote (`git ls-remote`, no fetch) whether it moved on.
+Enter first runs `git pull --ff-only` in the clone, then builds as above.
+It does not write into a clone's Dockerfile: that belongs upstream.
+
+### Stacks with their own `docker-update.sh`
+
+When the compose project's directory has a `docker-update.sh`, Enter keeps
+the backup tag and then runs that script instead of pull, build and up:
+
+```
+docker tag <running image> <image>:bak-<time>
+cd <project dir> && bash docker-update.sh
+docker image prune -f
+```
+
+### ↗ External, ▸ docker run
+
+Containers another tool started (an all-in-one installer, Portainer) or
+`docker run` started: checked like pulled ones, never touched. Update them
+where they were started.
+
+### Every kind
+
+Checks [endoflife.date](https://endoflife.date) for the base: alpine,
+debian, ubuntu, python, node, golang, postgres, redis, mariadb, mysql, php,
+ruby, nginx. ✗ eol once it is over, ! overdue 60 days before.
+
+After every update scurvy keeps the two newest `bak-` tags of the image and
+prints the line that brings the old one back:
+
+```
+cd <project dir> && docker tag <image>:bak-<time> <image>:<tag> && docker compose up -d <service>
+```
+
+On a section's line, Enter updates its containers that need it, one after
+the other.
 
 ## Labels
 

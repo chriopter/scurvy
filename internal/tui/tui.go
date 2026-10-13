@@ -27,7 +27,8 @@ type row struct {
 	group string      // the stack's name; empty for a container on its own
 	items []scan.Item // header: the stack's containers on screen; else one
 	head  bool
-	sub   bool // a container under its stack's header
+	sub   bool // a container under its section's header
+	total int  // header: all containers of the section, shown or not
 }
 
 // Model is the screen's state.
@@ -128,46 +129,49 @@ func failed(it scan.Item) bool { return it.Err != "" && it.Level == scan.OK }
 
 func needs(it scan.Item) bool { return it.Level > scan.OK || it.Err != "" }
 
-// rows groups the items by stack: the sickest stack first, inside it the
-// sickest container first. Containers on their own stand alone.
+// rows are the sections and their containers: one section per compose
+// stack, the sickest first, and one for containers standing alone (on
+// their own or the only one of their stack). Healthy ones show with a.
 func (m *Model) rows() []row {
-	type group struct {
-		name  string
+	type section struct {
+		name  string // empty: standalone
 		items []scan.Item
 		worst scan.Level
 	}
-	byName := map[string]*group{}
-	var groups []*group
+	count := map[string]int{}
+	for _, it := range m.items {
+		count[it.Project.Name]++
+	}
+	byName := map[string]*section{}
+	var secs []*section
 	for _, it := range m.items {
 		key := it.Project.Name
-		if key == "" {
-			key = "\x00" + it.Container.Name
+		if key == "" || count[key] == 1 && it.Service == key {
+			key = ""
 		}
-		g := byName[key]
-		if g == nil {
-			g = &group{name: it.Project.Name}
-			byName[key] = g
-			groups = append(groups, g)
+		s := byName[key]
+		if s == nil {
+			s = &section{name: key}
+			byName[key] = s
+			secs = append(secs, s)
 		}
-		g.items = append(g.items, it)
-		g.worst = max(g.worst, it.Level)
+		s.items = append(s.items, it)
+		s.worst = max(s.worst, it.Level)
 	}
-	key := func(g *group) string {
-		if g.name != "" {
-			return g.name
+	sort.SliceStable(secs, func(a, b int) bool {
+		x, y := secs[a], secs[b]
+		if (x.name == "") != (y.name == "") {
+			return y.name == "" // standalone last
 		}
-		return g.items[0].Container.Name
-	}
-	sort.SliceStable(groups, func(a, b int) bool {
-		if groups[a].worst != groups[b].worst {
-			return groups[a].worst > groups[b].worst
+		if x.worst != y.worst {
+			return x.worst > y.worst
 		}
-		return key(groups[a]) < key(groups[b])
+		return x.name < y.name
 	})
 	var out []row
-	for _, g := range groups {
+	for _, s := range secs {
 		var shown []scan.Item
-		for _, it := range g.items {
+		for _, it := range s.items {
 			if m.all || needs(it) {
 				shown = append(shown, it)
 			}
@@ -176,14 +180,9 @@ func (m *Model) rows() []row {
 			continue
 		}
 		scan.Sort(shown)
-		// A stack of one container named like the stack needs no header.
-		if g.name == "" || len(g.items) == 1 && g.items[0].Service == g.name {
-			out = append(out, row{group: g.name, items: shown[:1]})
-			continue
-		}
-		out = append(out, row{group: g.name, items: shown, head: true})
+		out = append(out, row{group: s.name, items: shown, head: true, total: len(s.items)})
 		for _, it := range shown {
-			out = append(out, row{group: g.name, items: []scan.Item{it}, sub: true})
+			out = append(out, row{group: s.name, items: []scan.Item{it}, sub: true})
 		}
 	}
 	return out
@@ -322,6 +321,9 @@ func targets(r row) []scan.Item {
 
 func name(r row) string {
 	if r.head {
+		if r.group == "" {
+			return "the standalone containers"
+		}
 		return r.group
 	}
 	return r.items[0].Name()

@@ -35,6 +35,13 @@ func Run(ctx context.Context, it scan.Item, out io.Writer) (rollback string, err
 	}
 	fmt.Fprintf(out, "🍋 prescribing limes to %s\n\n", it.Name())
 
+	// A build context that is a git clone first takes its upstream, so a
+	// version raised below lands on the newest code.
+	if it.Kind == scan.Built && it.Pull != "" {
+		if err := run(ctx, out, it.Pull, "git", "pull", "--ff-only"); err != nil {
+			return "", err
+		}
+	}
 	if it.Bump != nil {
 		before, after, err := it.Bump.Apply()
 		if err != nil {
@@ -63,18 +70,31 @@ func Run(ctx context.Context, it scan.Item, out io.Writer) (rollback string, err
 	compose := func(sub ...string) error {
 		return step(ctx, out, p.Dir, append([]string{"compose"}, sub...), p.Args(sub...)...)
 	}
-	if it.Kind == scan.Built {
-		err = compose("build", "--pull", it.Service)
-	} else {
-		err = compose("pull", it.Service)
-	}
-	if err != nil {
-		return undo(err)
-	}
-	if err := compose("up", "-d", it.Service); err != nil {
-		return undo(err)
+	switch {
+	case it.Hook != "":
+		// The stack brings its own way to update; it knows best.
+		if err := run(ctx, out, p.Dir, "bash", scan.HookFile); err != nil {
+			return undo(err)
+		}
+	case it.Kind == scan.Built:
+		if err := compose("build", "--pull", it.Service); err != nil {
+			return undo(err)
+		}
+		if err := compose("up", "-d", it.Service); err != nil {
+			return undo(err)
+		}
+		// Keep the build cache from growing without end; the newest stays warm.
+		_ = run(ctx, out, "", "docker", "builder", "prune", "-f", "--max-used-space", buildCache)
+	default:
+		if err := compose("pull", it.Service); err != nil {
+			return undo(err)
+		}
+		if err := compose("up", "-d", it.Service); err != nil {
+			return undo(err)
+		}
 	}
 	prune(ctx, ref.Name)
+	_ = run(ctx, out, "", "docker", "image", "prune", "-f")
 
 	tag := ref.Tag
 	if tag == "" {
@@ -90,6 +110,21 @@ func Run(ctx context.Context, it scan.Item, out io.Writer) (rollback string, err
 		rollback = fmt.Sprintf("put %s back in %s, then %s", it.Bump.Old, it.Bump.File, rollback)
 	}
 	return rollback, nil
+}
+
+// buildCache is how much build cache stays after a build.
+const buildCache = "10GB"
+
+// run runs any command where the user can watch it.
+func run(ctx context.Context, out io.Writer, dir, name string, args ...string) error {
+	fmt.Fprintf(out, "\033[2m$ %s %s\033[0m\n", name, strings.Join(quote(args), " "))
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s %s failed: %w", name, args[0], err)
+	}
+	return nil
 }
 
 // step runs one docker command where the user can watch it, showing it

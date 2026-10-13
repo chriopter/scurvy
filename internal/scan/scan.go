@@ -33,10 +33,10 @@ const (
 type Level int
 
 const (
-	OK    Level = iota // nothing newer
-	Fresh              // something newer, not for long
-	Due                // something newer for longer than its grace
-	Sick               // end of life
+	OK      Level = iota // current: nothing newer
+	Update               // an update is there, not for long
+	Overdue              // an update is there for longer than its grace
+	EOL                  // the base gets no fixes any more
 )
 
 // How long an update may wait before it is due, unless a container's
@@ -47,6 +47,10 @@ const (
 	dueBuild  = 30 * 24 * time.Hour // a build, or a newer base under it
 	eolSoon   = 60 * 24 * time.Hour // warn this long before end of life
 )
+
+// HookFile, in a stack's directory, updates the stack in place of pull,
+// build and up; scurvy runs it as it is.
+const HookFile = "docker-update.sh"
 
 // Labels a compose service can set.
 const (
@@ -68,13 +72,17 @@ type Item struct {
 	Latest   string // what is waiting, if it has a name
 	Err      string // why something could not be checked
 
-	Bump *Bump // a pinned version to raise first, if any
+	Bump *Bump  // a pinned version to raise first, if any
+	Pull string // a build context that is a git clone behind its upstream
+	Hook string // the stack's own update script (docker-update.sh), if any
 }
 
 // Finding is one thing found, with its weight.
 type Finding struct {
 	Level Level
-	Text  string
+	Short string    // a few words for the table, empty for side notes
+	Text  string    // the whole sentence
+	Since time.Time // since when it is so, if known
 }
 
 // Bump raises a pinned version in a file: Old becomes New.
@@ -93,8 +101,8 @@ func (it Item) Name() string {
 // Updatable reports whether scurvy can update it: compose knows how.
 func (it Item) Updatable() bool { return it.Kind != Loose && it.Project.Name != "" }
 
-func (it *Item) add(l Level, format string, a ...any) {
-	it.Findings = append(it.Findings, Finding{l, fmt.Sprintf(format, a...)})
+func (it *Item) add(l Level, since time.Time, short, format string, a ...any) {
+	it.Findings = append(it.Findings, Finding{l, short, fmt.Sprintf(format, a...), since})
 	if l > it.Level {
 		it.Level = l
 	}
@@ -104,7 +112,7 @@ func (it *Item) add(l Level, format string, a ...any) {
 type Scanner struct {
 	reg    *registry.Client
 	images *docker.Images
-	eol    *EOL
+	eol    *eolDates
 	now    time.Time
 }
 
@@ -115,7 +123,7 @@ func Scan(ctx context.Context, progress func(done, total int)) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Scanner{reg: registry.New(), images: docker.NewImages(), eol: NewEOL(), now: time.Now()}
+	s := &Scanner{reg: registry.New(), images: docker.NewImages(), eol: newEOLDates(), now: time.Now()}
 
 	// Each compose project is resolved once.
 	type resolved struct {
@@ -170,6 +178,14 @@ func Scan(ctx context.Context, progress func(done, total int)) ([]Item, error) {
 	total := len(items)
 	if progress != nil {
 		progress(0, total)
+	}
+	for _, it := range items {
+		if it.Updatable() && it.Project.Dir != "" {
+			f := filepath.Join(it.Project.Dir, HookFile)
+			if st, err := os.Stat(f); err == nil && st.Mode().IsRegular() {
+				it.Hook = f
+			}
+		}
 	}
 	work := make(chan *Item)
 	var wg sync.WaitGroup
@@ -233,13 +249,13 @@ func (s *Scanner) pulled(ctx context.Context, it *Item) {
 	it.Current = ref.Tag
 	if ref.Digest != "" {
 		it.Current = "@" + short(ref.Digest)
-		it.add(OK, "pinned by digest")
+		it.add(OK, time.Time{}, "", "pinned by digest")
 		s.endOfLife(ctx, it, ref)
 		return
 	}
 	due := it.due(dueTag)
 	if tagged := s.images.Get(ctx, it.Image); tagged != nil && tagged.ID != it.Container.ImageID {
-		it.add(Fresh, "newer image already pulled, container still on the old one")
+		it.add(Update, time.Time{}, "pulled, not recreated", "newer image already pulled, container still on the old one")
 	}
 	running := s.images.Get(ctx, it.Container.ImageID)
 	digest, err := s.reg.Digest(ctx, ref)
@@ -249,11 +265,11 @@ func (s *Scanner) pulled(ctx context.Context, it *Item) {
 	case running == nil:
 		it.Err = "image of the container not found"
 	case len(running.RepoDigests) == 0:
-		it.add(OK, "no registry digest on the local image")
+		it.add(OK, time.Time{}, "", "no registry digest on the local image")
 	case !running.HasDigest(digest):
 		created, _ := s.reg.Created(ctx, ref, digest)
 		it.Latest = ref.Tag + "@" + short(digest)
-		it.add(s.level(created, due), "new image for %s, %s", ref.Tag, s.ago(created, "built"))
+		it.add(s.level(created, due), created, "new image", "new image for %s, %s", ref.Tag, s.ago(created, "built"))
 	}
 
 	if pinned(ref.Tag) {
@@ -262,25 +278,18 @@ func (s *Scanner) pulled(ctx context.Context, it *Item) {
 			if minor != "" {
 				created, _ := s.reg.Created(ctx, ref, minor)
 				it.Latest = minor
-				it.add(s.level(created, it.due(duePinned)), "%s → %s, %s", ref.Tag, minor, s.ago(created, "released"))
+				it.add(s.level(created, it.due(duePinned)), created, "new version", "%s → %s, %s", ref.Tag, minor, s.ago(created, "released"))
 				it.Bump = findBump(it.Project.Files, ref.Name+":"+ref.Tag, ref.Name+":"+minor)
 				if it.Bump == nil && it.Updatable() {
-					it.add(OK, "set %s in the compose file by hand", minor)
+					it.add(OK, time.Time{}, "", "set %s in the compose file by hand", minor)
 				}
 			}
 			if major != "" {
-				it.add(OK, "new major version %s", major)
+				it.add(OK, time.Time{}, "", "new major version %s", major)
 			}
 		}
 	}
 	s.endOfLife(ctx, it, ref)
-	if it.Kind == Loose {
-		if it.Project.Name != "" {
-			it.add(OK, "started by %s, not from a compose file: update it there", it.Project.Name)
-		} else {
-			it.add(OK, "not started by compose: update it by hand")
-		}
-	}
 }
 
 // built checks an image compose builds: how old the build is, whether its
@@ -292,7 +301,7 @@ func (s *Scanner) built(ctx context.Context, it *Item, svc docker.Service) {
 		return
 	}
 	if latest := s.images.Get(ctx, it.Image); latest != nil && latest.ID != it.Container.ImageID {
-		it.add(Fresh, "newer build ready, container still on the old one")
+		it.add(Update, time.Time{}, "built, not recreated", "newer build ready, container still on the old one")
 	}
 	// The image's own date. (Its last tag time moves with every backup
 	// tag, so it says nothing about the build.)
@@ -300,12 +309,17 @@ func (s *Scanner) built(ctx context.Context, it *Item, svc docker.Service) {
 	due := it.due(dueBuild)
 	it.Current = s.ago(built, "built")
 	if !built.IsZero() && s.now.Sub(built) > due {
-		it.add(Due, "build is %s", s.ago(built, ""))
+		it.add(Overdue, built, "old build", "build is %s", s.ago(built, ""))
 	}
 
 	dir := svc.Build.Context
+	clone, moved := gitClone(ctx, dir)
+	if moved {
+		it.Pull = dir
+		it.add(Update, time.Time{}, "upstream moved", "the build context is a git clone, and its upstream has new commits")
+	}
 	if changed := lastCommit(ctx, dir); !built.IsZero() && changed.After(built.Add(time.Minute)) {
-		it.add(Fresh, "code %s, after the build", s.ago(changed, "changed"))
+		it.add(Update, changed, "code changed", "code %s, after the build", s.ago(changed, "changed"))
 	}
 
 	file := svc.Build.Dockerfile
@@ -326,13 +340,16 @@ func (s *Scanner) built(ctx context.Context, it *Item, svc docker.Service) {
 			if minor != "" {
 				created, _ := s.reg.Created(ctx, ref, minor)
 				it.Latest = minor
-				it.add(s.level(created, it.due(duePinned)), "base %s → %s, %s", ref.Name+":"+ref.Tag, minor, s.ago(created, "released"))
-				if !strings.Contains(b.raw, "$") {
+				it.add(s.level(created, it.due(duePinned)), created, "new base version", "base %s → %s, %s", ref.Name+":"+ref.Tag, minor, s.ago(created, "released"))
+				switch {
+				case clone: // not ours to edit: the next pull would clash
+					it.add(OK, time.Time{}, "", "the Dockerfile belongs to the clone's upstream; raise it there")
+				case !strings.Contains(b.raw, "$"):
 					it.Bump = findBump([]string{file}, ref.Name+":"+ref.Tag, ref.Name+":"+minor)
 				}
 			}
 			if major != "" {
-				it.add(OK, "base has a new major version %s", major)
+				it.add(OK, time.Time{}, "", "base has a new major version %s", major)
 			}
 		}
 	} else if ref.Digest == "" {
@@ -340,7 +357,7 @@ func (s *Scanner) built(ctx context.Context, it *Item, svc docker.Service) {
 			it.Err = err.Error()
 		} else if created, err := s.reg.Created(ctx, ref, digest); err == nil &&
 			!built.IsZero() && created.After(built) {
-			it.add(s.level(created, due), "base %s has a newer image, %s", b.ref, s.ago(created, "built"))
+			it.add(s.level(created, due), created, "new base image", "base %s has a newer image, %s", b.ref, s.ago(created, "built"))
 		}
 	}
 	s.endOfLife(ctx, it, ref)
@@ -354,11 +371,11 @@ func (s *Scanner) endOfLife(ctx context.Context, it *Item, ref registry.Ref) {
 		switch {
 		case end.IsZero():
 		case end.Unix() == 0:
-			it.add(Sick, "%s is end of life", rel.label)
+			it.add(EOL, time.Time{}, rel.label+" end of life", "%s is end of life", rel.label)
 		case end.Before(s.now):
-			it.add(Sick, "%s is end of life since %s", rel.label, end.Format("2006-01-02"))
+			it.add(EOL, time.Time{}, rel.label+" end of life", "%s is end of life since %s", rel.label, end.Format("2006-01-02"))
 		case end.Before(s.now.Add(eolSoon)):
-			it.add(Due, "%s reaches end of life on %s", rel.label, end.Format("2006-01-02"))
+			it.add(Overdue, time.Time{}, rel.label+" end of life soon", "%s reaches end of life on %s", rel.label, end.Format("2006-01-02"))
 		}
 	}
 }
@@ -366,9 +383,9 @@ func (s *Scanner) endOfLife(ctx context.Context, it *Item, ref registry.Ref) {
 // level weighs an update by how long it has been waiting.
 func (s *Scanner) level(since time.Time, due time.Duration) Level {
 	if !since.IsZero() && s.now.Sub(since) > due {
-		return Due
+		return Overdue
 	}
-	return Fresh
+	return Update
 }
 
 func (s *Scanner) ago(t time.Time, verb string) string {
@@ -442,6 +459,32 @@ func lastCommit(ctx context.Context, dir string) time.Time {
 	return time.Unix(sec, 0)
 }
 
+// gitClone reports whether dir is a git clone of its own (not a folder in
+// a bigger repository) with an upstream, and whether that upstream branch
+// points elsewhere than HEAD. It asks the remote without fetching, so
+// nothing changes here.
+func gitClone(ctx context.Context, dir string) (clone, moved bool) {
+	git := func(args ...string) string {
+		out, err := exec.CommandContext(ctx, "git", append([]string{"-c", "safe.directory=*", "-C", dir}, args...)...).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	top := git("rev-parse", "--show-toplevel")
+	if top == "" || filepath.Clean(top) != filepath.Clean(dir) {
+		return false, false
+	}
+	up := git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") // origin/main
+	remote, branch, ok := strings.Cut(up, "/")
+	if !ok {
+		return false, false
+	}
+	head := git("rev-parse", "HEAD")
+	f := strings.Fields(git("ls-remote", remote, "refs/heads/"+branch))
+	return true, head != "" && len(f) > 0 && f[0] != head
+}
+
 // findBump finds the file among files that names old, so it can say new.
 func findBump(files []string, old, new string) *Bump {
 	for _, f := range files {
@@ -499,4 +542,18 @@ func (it Item) Source() string {
 		return "pinned"
 	}
 	return "registry"
+}
+
+// Top is the finding that counts most: the first one that asks for
+// something. ok is false when there is none.
+func (it Item) Top() (Finding, bool) {
+	if len(it.Findings) > 0 && it.Findings[0].Level > OK {
+		return it.Findings[0], true
+	}
+	return Finding{}, false
+}
+
+// Word is a level's name: current, update, overdue, eol.
+func (l Level) Word() string {
+	return [...]string{"current", "update", "overdue", "eol"}[l]
 }

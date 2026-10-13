@@ -75,15 +75,15 @@ func list() error {
 		return err
 	}
 	for _, it := range items {
-		sign := map[scan.Level]string{scan.OK: "ok", scan.Fresh: "fresh", scan.Due: "overdue", scan.Sick: "sick"}[it.Level]
+		sign := it.Level.Word()
 		if it.Err != "" && it.Level == scan.OK {
-			sign = "unknown"
+			sign = "unchecked"
 		}
 		name := it.Name()
 		if it.Project.Name != "" && it.Project.Name != it.Service {
 			name = it.Project.Name + "/" + name
 		}
-		fmt.Printf("%-8s %-32s %-7s %s\n", sign, name, it.Kind, it.Image)
+		fmt.Printf("%-9s %-32s %-10s %s\n", sign, name, it.Source(), it.Image)
 		for _, f := range it.Findings {
 			fmt.Printf("         · %s\n", f.Text)
 		}
