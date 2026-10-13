@@ -567,3 +567,29 @@ func (c *Client) hubGet(ctx context.Context, u string, v any) error {
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(v)
 }
+
+// RecentTags lists the tags pushed last: on Docker Hub the newest hundred,
+// elsewhere all of them. Enough to see a new major version.
+func (c *Client) RecentTags(ctx context.Context, r Ref) ([]string, error) {
+	ns, name, ok := hubRepo(r)
+	if !ok {
+		return c.Tags(ctx, r, "")
+	}
+	v, err := c.remember("hubrecent "+r.Repo, func() (any, error) {
+		var list struct {
+			Results []struct {
+				Name string `json:"name"`
+			} `json:"results"`
+		}
+		if err := c.hubGet(ctx, hubAPI+ns+"/repositories/"+name+"/tags?page_size=100&ordering=last_updated", &list); err != nil {
+			return nil, err
+		}
+		var out []string
+		for _, t := range list.Results {
+			out = append(out, t.Name)
+		}
+		return out, nil
+	})
+	tags, _ := v.([]string)
+	return tags, err
+}

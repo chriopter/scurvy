@@ -32,6 +32,8 @@ type Container struct {
 	Image   string // the image as configured, e.g. ghcr.io/acme/web:latest
 	ImageID string // the image it actually runs
 	Labels  map[string]string
+	State   string // running, exited, restarting, created, paused, dead
+	Failed  bool   // stopped with an error, or restarting over and over
 }
 
 // Project and Service of the compose project that started it; empty for
@@ -81,9 +83,9 @@ func firstLine(s string) string {
 	return s
 }
 
-// Running lists the running containers.
-func Running(ctx context.Context) ([]Container, error) {
-	out, err := run(ctx, "", "ps", "-q", "--no-trunc")
+// All lists the containers, running or not.
+func All(ctx context.Context) ([]Container, error) {
+	out, err := run(ctx, "", "ps", "-a", "-q", "--no-trunc")
 	if err != nil {
 		return nil, err
 	}
@@ -103,6 +105,10 @@ func Running(ctx context.Context) ([]Container, error) {
 			Image  string
 			Labels map[string]string
 		}
+		State struct {
+			Status   string
+			ExitCode int
+		}
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, err
@@ -115,6 +121,8 @@ func Running(ctx context.Context) ([]Container, error) {
 			Image:   r.Config.Image,
 			ImageID: r.Image,
 			Labels:  r.Config.Labels,
+			State:   r.State.Status,
+			Failed:  r.State.Status == "restarting" || r.State.Status == "dead" || r.State.Status == "exited" && r.State.ExitCode != 0,
 		})
 	}
 	return cs, nil

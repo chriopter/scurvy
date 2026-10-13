@@ -27,34 +27,51 @@ func numbers(tag string) []int {
 	return n
 }
 
-// less compares two versions of the same shape.
+// less compares two versions; missing parts count as 0 (12.2 is 12.2.0).
 func less(a, b []int) bool {
-	for i := range a {
-		if a[i] != b[i] {
-			return a[i] < b[i]
+	for i := 0; i < max(len(a), len(b)); i++ {
+		x, y := 0, 0
+		if i < len(a) {
+			x = a[i]
+		}
+		if i < len(b) {
+			y = b[i]
+		}
+		if x != y {
+			return x < y
 		}
 	}
 	return false
 }
 
-// newerTag finds, among tags, the newest version of the same shape as
-// cur (same number of parts, same v prefix) within cur's major version.
-// A new major is a decision of its own, not an update.
-func newerTag(tags []string, cur string) string {
-	c := numbers(cur)
+// versions are the plain version tags among tags, with cur's v prefix.
+func versions(tags []string, cur string) []string {
 	v := strings.HasPrefix(cur, "v")
-	var best []int
-	newest := ""
+	var out []string
 	for _, t := range tags {
-		if !pinned(t) || strings.HasPrefix(t, "v") != v {
-			continue
-		}
-		n := numbers(t)
-		if len(n) == len(c) && n[0] == c[0] && less(c, n) && (best == nil || less(best, n)) {
-			best, newest = n, t
+		if pinned(t) && strings.HasPrefix(t, "v") == v {
+			out = append(out, t)
 		}
 	}
-	return newest
+	return out
+}
+
+// newerTag finds the newest version newer than cur within cur's major
+// version, and the newest of a later major: that one is a decision of its
+// own, offered but never taken by itself.
+func newerTag(tags []string, cur string) (minor, major string) {
+	c := numbers(cur)
+	for _, t := range versions(tags, cur) {
+		n := numbers(t)
+		switch {
+		case !less(c, n):
+		case n[0] == c[0] && (minor == "" || less(numbers(minor), n)):
+			minor = t
+		case n[0] > c[0] && (major == "" || less(numbers(major), n)):
+			major = t
+		}
+	}
+	return minor, major
 }
 
 // majorOf is the start every newer version of the same major shares:
@@ -72,21 +89,27 @@ func majorOf(tag string) string {
 	return p
 }
 
-// Versions lists the versions an image could be pinned to: the tags of
-// the same shape as its own (10.11.11: three numbers), newest first.
+// Versions lists the versions an image could be pinned to, newest first:
+// those of its own major, and the newest ones of every other.
 func Versions(ctx context.Context, image string) ([]string, error) {
 	ref := registry.Parse(image)
 	if !pinned(ref.Tag) {
 		return nil, fmt.Errorf("%s is not pinned to a version", image)
 	}
-	tags, err := registry.New().Tags(ctx, ref, "")
+	reg := registry.New()
+	same, err := reg.Tags(ctx, ref, majorOf(ref.Tag))
 	if err != nil {
 		return nil, err
 	}
-	c, v := numbers(ref.Tag), strings.HasPrefix(ref.Tag, "v")
+	recent, err := reg.RecentTags(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
 	var out []string
-	for _, t := range tags {
-		if pinned(t) && strings.HasPrefix(t, "v") == v && len(numbers(t)) == len(c) {
+	for _, t := range versions(append(same, recent...), ref.Tag) {
+		if !seen[t] {
+			seen[t] = true
 			out = append(out, t)
 		}
 	}

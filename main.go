@@ -127,7 +127,7 @@ func state(it scan.Item) string {
 
 // lineProtocol is one InfluxDB line per container, for Telegraf's exec
 // input: tags stack, container, type; fields state, level (0 up to date …
-// 3 end of life, -1 not checked) and waiting_days.
+// 3 end of life, -1 not checked), waiting_days and running (1 or 0).
 func lineProtocol(items []scan.Item) string {
 	tag := strings.NewReplacer(",", `\,`, " ", `\ `, "=", `\=`)
 	var b strings.Builder
@@ -144,8 +144,12 @@ func lineProtocol(items []scan.Item) string {
 		if stack == "" {
 			stack = "-"
 		}
-		fmt.Fprintf(&b, "scurvy,stack=%s,container=%s,type=%s state=%q,level=%di,waiting_days=%di\n",
-			tag.Replace(stack), tag.Replace(it.Name()), tag.Replace(it.Source()), state(it), level, waiting)
+		running := 0
+		if it.Up() {
+			running = 1
+		}
+		fmt.Fprintf(&b, "scurvy,stack=%s,container=%s,type=%s state=%q,level=%di,waiting_days=%di,running=%di\n",
+			tag.Replace(stack), tag.Replace(it.Name()), tag.Replace(it.Source()), state(it), level, waiting, running)
 	}
 	return b.String()
 }
