@@ -17,22 +17,24 @@ scurvy finds the running containers and reads their compose files and Dockerfile
 
 | status | means |
 |---|---|
-| up to date | nothing newer |
-| update available | a new image or version is there |
-| update overdue | waiting too long: 14 days for an image, 90 for a version, 30 for a build |
-| end of life | the base (alpine, debian, python, node, …) gets no fixes any more |
-| not checked | the registry did not answer, or the image is private |
+| 🟢 up to date | nothing newer |
+| 🔵 update available | a new image or version is there |
+| 🟡 update overdue | waiting too long: 14 days for an image, 90 for a version, 30 for a build |
+| 🔴 end of life | the base (alpine, debian, python, node, …) gets no fixes any more |
+| ⚪ not checked | the registry did not answer, or the image is private |
 
 Enter keeps the running image as a backup, updates, and waits until the containers are healthy. If anything fails, it puts everything back.
 
-| container | Enter |
-|---|---|
-| `image: app:latest` | pulls, restarts |
-| `image: postgres:16.4` | writes `16.6` into the compose file, pulls, restarts |
-| `build:` | raises a pinned `FROM` and its `-builder` stages, rebuilds, restarts |
-| `build:` from a git clone | `git pull`, rebuilds, restarts |
-| stack with `docker-update.sh` | runs that script |
-| pinned by digest, another tool's, `docker run` | nothing |
+| type | image comes from | Enter |
+|---|---|---|
+| image | a registry, moving tag (`:latest`) | pulls, restarts |
+| version | a registry, fixed version (`:16.4`) | writes `16.6` into the compose file, pulls, restarts |
+| build | a local Dockerfile | raises a fixed `FROM`, rebuilds, restarts |
+| build | a local Dockerfile in a git clone | `git pull`, rebuilds, restarts |
+| digest | a registry, fixed digest (`@sha256:…`) | nothing |
+| external | another tool, or `docker run` | nothing |
+
+A stack with its own `docker-update.sh` gets that script run instead.
 
 [Details](docs/how.md)
 
