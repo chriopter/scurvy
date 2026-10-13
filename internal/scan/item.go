@@ -64,10 +64,10 @@ type Item struct {
 	Current  string   // what runs: a tag, a version, "built 3 days ago"
 	Errs     []string // checks that could not be done, and why
 
-	Edits []Edit // exact lines to change before updating: a raised version
-	Pull  string // a build context that is a git clone behind its upstream
-	Hook  string // the stack's own update script, if any
-	Major string // a later major version of a pinned image: offered, never taken by itself
+	Edits  []Edit // exact lines to change before updating: a raised version
+	Pull   string // a build context that is a git clone behind its upstream
+	Hook   string // the stack's own update script, if any
+	Newest string // the newest version out for a pinned image: news, e pins to it
 }
 
 // Finding is one thing found, with its weight.
