@@ -112,7 +112,7 @@ func (m *Model) render() string {
 	area := max(8, h-4) // title, counts above; status, keys below
 	var panels string
 	if w >= 100 {
-		lw := min(max(w*38/100, 36), 56)
+		lw := min(max(w*50/100, 60), w-40)
 		panels = lipgloss.JoinHorizontal(lipgloss.Top,
 			m.listPanel(lw, area), m.rightPanel(w-lw, area))
 	} else {
@@ -213,6 +213,7 @@ func (m *Model) listPanel(w, h int) string {
 	}
 	rows := m.rows()
 	c := m.columns(rows, inner)
+	room-- // the column names stay on top
 	var lines []string
 	pickAt := 0
 	for i, r := range rows {
@@ -244,24 +245,49 @@ func (m *Model) listPanel(w, h int) string {
 		m.top = pickAt - room + 1
 	}
 	m.top = max(0, min(m.top, max(0, len(lines)-room)))
-	return panel(title, lines[m.top:min(len(lines), m.top+room)], w, h, active)
+	shown := append([]string{c.header(inner)}, lines[m.top:min(len(lines), m.top+room)]...)
+	return panel(title, shown, w, h, active)
 }
 
-// cols are the widths of a container's line: its name, then its state.
-type cols struct{ name int }
+// cols are the widths of the list's columns.
+type cols struct{ name, state, kind int }
+
+const waitW = 4 // "WAIT", "120d"
 
 func (m *Model) columns(rows []row, inner int) cols {
-	c := cols{name: 8}
+	c := cols{name: len("CONTAINER"), state: len("update available"), kind: len("external")}
 	for _, r := range rows {
 		if !r.head {
 			c.name = max(c.name, lipgloss.Width(short(r.items[0], r.group)))
 		}
 	}
-	return cols{name: min(c.name, inner-2-len("update available"))}
+	c.name = min(c.name, max(8, inner-c.state-c.kind-waitW-6))
+	return c
 }
 
-// line draws one row: a group's name over a line, or a container and its
-// state in words. Everything else is on the right.
+// header names the columns, as k9s and docker ps do.
+func (c cols) header(inner int) string {
+	h := fit("CONTAINER", c.name) + "  " + fit("STATE", c.state) + "  " + fit("TYPE", c.kind) + "  " + fmt.Sprintf("%*s", waitW, "WAIT")
+	return lipgloss.NewStyle().Foreground(cDim).Bold(true).Render(fit(h, inner))
+}
+
+// kindWord says how the container's image is made, in one word.
+func kindWord(it scan.Item) string {
+	switch it.Source() {
+	case "own build":
+		return "build"
+	case "pinned":
+		return "version"
+	case "registry":
+		return "image"
+	case "docker run":
+		return "run"
+	}
+	return it.Source() // digest, external
+}
+
+// line draws one row: a group's name over a line, or a container with
+// its state, type and how long its update has waited.
 func (m *Model) line(r row, picked bool, c cols, inner int) string {
 	on := func(s lipgloss.Style) lipgloss.Style {
 		if picked {
@@ -279,10 +305,21 @@ func (m *Model) line(r row, picked bool, c cols, inner int) string {
 	}
 	it := r.items[0]
 	st := stateOf(it)
-	name := on(sText).Render(short(it, r.group))
-	line := name + on(lipgloss.NewStyle()).Render(strings.Repeat(" ", max(2, c.name+2-lipgloss.Width(name)))) +
-		on(st.style()).Render(st.word)
+	waiting := ""
+	if f, ok := it.Top(); ok && !f.Since.IsZero() {
+		waiting = fmt.Sprintf("%dd", int(time.Since(f.Since).Hours()/24))
+	}
+	gap := on(lipgloss.NewStyle()).Render("  ")
+	line := cellOn(on(sText).Render(short(it, r.group)), c.name, on) + gap +
+		cellOn(on(st.style()).Render(st.word), c.state, on) + gap +
+		cellOn(on(sDim).Render(kindWord(it)), c.kind, on) + gap +
+		on(st.style()).Render(fmt.Sprintf("%*s", waitW, waiting))
 	return fit(line, inner, on)
+}
+
+// cellOn fits styled text into n cells, the fill styled too.
+func cellOn(s string, n int, on func(lipgloss.Style) lipgloss.Style) string {
+	return fit(s, n, on)
 }
 
 func chipsOn(items []scan.Item, on func(lipgloss.Style) lipgloss.Style) string {
