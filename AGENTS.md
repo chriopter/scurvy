@@ -6,8 +6,10 @@ A feature that needs one of those is not for scurvy.
 - Everything is found from what runs: compose labels, `docker compose
   config`, Dockerfiles, registries. Settings are compose labels
   (`scurvy.*`), nothing else.
-- Checking never changes anything. Only `fix` (Enter) does, and it shows
-  every command it runs.
+- Checking never changes anything (git is asked with `ls-remote`, never
+  fetched). Only `fix` (Enter) does, and it shows every command it runs.
+- What Enter runs per kind of container is listed in the README; change
+  both together.
 - The screen may joke (scurvy, limes, abandon ship); `scurvy list` and
   errors say plainly what is the matter.
 

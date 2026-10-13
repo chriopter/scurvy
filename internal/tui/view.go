@@ -14,44 +14,66 @@ import (
 	"github.com/chriopter/scurvy/internal/scan"
 )
 
-// The look follows gum's: one pink accent, quiet greys, coloured badges
-// for what needs attention.
+// One pink accent for scurvy itself; every other colour says a state.
 var (
-	cAccent = lipgloss.Color("212") // gum's pink
-	cText   = lipgloss.Color("252")
-	cDim    = lipgloss.Color("245")
-	cFaint  = lipgloss.Color("240")
-	cPickBg = lipgloss.Color("236")
-	cOK     = lipgloss.Color("78")
-	cFresh  = lipgloss.Color("220")
-	cDue    = lipgloss.Color("209")
-	cSick   = lipgloss.Color("197")
-	cUnk    = lipgloss.Color("141")
-	cInk    = lipgloss.Color("16")
+	cAccent  = lipgloss.Color("212")
+	cText    = lipgloss.Color("252")
+	cDim     = lipgloss.Color("245")
+	cFaint   = lipgloss.Color("240")
+	cPickBg  = lipgloss.Color("236")
+	cCurrent = lipgloss.Color("78")  // green
+	cUpdate  = lipgloss.Color("75")  // blue
+	cOverdue = lipgloss.Color("214") // orange
+	cEOL     = lipgloss.Color("203") // red
+	cUnk     = lipgloss.Color("244") // grey
+	cInk     = lipgloss.Color("16")
 
 	sDim    = lipgloss.NewStyle().Foreground(cDim)
 	sFaint  = lipgloss.NewStyle().Foreground(cFaint)
-	sOK     = lipgloss.NewStyle().Foreground(cOK)
-	sDue    = lipgloss.NewStyle().Foreground(cDue)
-	sErr    = lipgloss.NewStyle().Foreground(cUnk)
+	sOK     = lipgloss.NewStyle().Foreground(cCurrent)
+	sDue    = lipgloss.NewStyle().Foreground(cOverdue)
+	sErr    = lipgloss.NewStyle().Foreground(cEOL)
 	sAccent = lipgloss.NewStyle().Foreground(cAccent)
 	sBold   = lipgloss.NewStyle().Foreground(cText).Bold(true)
 )
 
-// badge is a level's label on its colour.
-func badge(l scan.Level, unchecked bool) (string, lipgloss.Style) {
-	b := lipgloss.NewStyle().Foreground(cInk).Bold(true)
+// state is how a container stands: its sign, word and colour.
+type state struct {
+	sign, word string
+	color      color.Color
+}
+
+func stateOf(l scan.Level, unchecked bool) state {
 	switch {
-	case l == scan.Sick:
-		return "EOL", b.Background(cSick)
-	case l == scan.Due:
-		return "OVERDUE", b.Background(cDue)
-	case l == scan.Fresh:
-		return "FRESH", b.Background(cFresh)
+	case l == scan.EOL:
+		return state{"✗", "eol", cEOL}
+	case l == scan.Overdue:
+		return state{"!", "overdue", cOverdue}
+	case l == scan.Update:
+		return state{"↑", "update", cUpdate}
 	case unchecked:
-		return "UNKNOWN", b.Background(cUnk)
+		return state{"?", "unchecked", cUnk}
 	}
-	return "OK", lipgloss.NewStyle().Foreground(cOK)
+	return state{"✓", "current", cCurrent}
+}
+
+func (st state) style() lipgloss.Style { return lipgloss.NewStyle().Foreground(st.color) }
+
+// source is a one-cell sign for where an image comes from, and its words.
+func source(it scan.Item) (string, string) {
+	switch it.Source() {
+	case "own build":
+		return "⚒", "own build, from a Dockerfile"
+	case "pinned":
+		return "#", "pinned version from a registry"
+	case "digest":
+		return "@", "pinned by digest"
+	case "external":
+		return "↗", "started by " + it.Project.Name + ", not from a compose file"
+	case "docker run":
+		return "▸", "started with docker run"
+	}
+	return "↓", "pulled from a registry"
 }
 
 func (m *Model) View() tea.View {
@@ -61,28 +83,53 @@ func (m *Model) View() tea.View {
 	return v
 }
 
-// cols are the table's column widths, inside its border.
-type cols struct{ name, source, running, status, finding int }
+// cols are the widths of a container line, inside the frame.
+type cols struct{ name, version, what int }
 
-const gap = 2
+const (
+	gap  = 2
+	ageW = 5 // "120d"
+)
 
 func (m *Model) columns(inner int) cols {
-	c := cols{name: len("CONTAINER"), source: len("docker run"), running: len("RUNNING"), status: len(" OVERDUE ")}
+	c := cols{name: 10, version: 7}
 	for _, it := range m.items {
-		c.name = max(c.name, len([]rune(it.Name()))+2, len([]rune(it.Project.Name)))
-		c.running = max(c.running, len([]rune(it.Current)))
+		c.name = max(c.name, len([]rune(it.Name())))
+		cur, next := version(it)
+		w := lipgloss.Width(cur)
+		if next != "" {
+			w += 3 + lipgloss.Width(next)
+		}
+		c.version = max(c.version, w)
 	}
-	c.name = min(c.name, 30)
-	c.running = min(c.running, 18)
-	// cursor, then four gaps between five columns
-	c.finding = inner - 2 - c.name - c.source - c.running - c.status - 4*gap
-	if c.finding < 24 { // narrow: give the findings room first
-		c.running = min(c.running, 10)
-		c.name = min(c.name, 20)
-		c.finding = inner - 2 - c.name - c.source - c.running - c.status - 4*gap
+	c.name = min(c.name, 28)
+	c.version = min(c.version, 26)
+	fixed := 2 + 2 + gap + 1 + gap + gap + ageW + gap // cursor, sign, source, age
+	c.what = inner - fixed - c.name - c.version
+	if c.what < 20 {
+		c.name, c.version = min(c.name, 18), min(c.version, 16)
+		c.what = inner - fixed - c.name - c.version
 	}
-	c.finding = max(c.finding, 8)
+	c.what = max(c.what, 6)
 	return c
+}
+
+// version is what runs and, for a raised pin, what comes.
+func version(it scan.Item) (cur, next string) {
+	if it.Bump != nil {
+		return tagOf(it.Bump.Old), tagOf(it.Bump.New)
+	}
+	if it.Kind == scan.Built {
+		return strings.Replace(strings.Replace(it.Current, " days", "d", 1), " day", "d", 1), ""
+	}
+	return it.Current, ""
+}
+
+func tagOf(ref string) string {
+	if i := strings.LastIndex(ref, ":"); i >= 0 && i > strings.LastIndex(ref, "/") {
+		return ref[i+1:]
+	}
+	return ref
 }
 
 func (m *Model) render() string {
@@ -93,81 +140,60 @@ func (m *Model) render() string {
 	if h <= 0 {
 		h = 30
 	}
+	detailH := 7
+	frame := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cFaint).Padding(0, 1)
+	tableH := max(6, h-4-detailH)
+	inner := w - frame.GetHorizontalFrameSize()
+	table := frame.Width(w).Height(tableH).Render(m.table(inner, tableH-frame.GetVerticalFrameSize()))
 
-	head := m.titleLine(w)
-	pills := m.pills()
-	foot := []string{m.status(w), m.help(w)}
-	detailH := 6 // border, title and four lines
-	tableH := max(5, h-2-len(foot)-detailH)
-
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cFaint).Padding(0, 1)
-	inner := w - box.GetHorizontalFrameSize()
-	table := box.Width(w).Height(tableH).Render(m.table(inner, tableH-2))
-
-	rows := m.rows()
-	var detail string
-	if !m.scanning || len(m.items) > 0 {
-		if m.pick < len(rows) {
-			detail = m.detail(rows[m.pick], w, detailH)
-		}
+	detail := strings.Repeat("\n", detailH-1)
+	if rows := m.rows(); m.pick < len(rows) && len(m.items) > 0 {
+		detail = m.detail(rows[m.pick], w, detailH)
 	}
-	if detail == "" {
-		detail = strings.Repeat("\n", detailH-1)
-	}
-	return lipgloss.JoinVertical(lipgloss.Left, head, pills, table, detail, foot[0], foot[1])
+	return lipgloss.JoinVertical(lipgloss.Left, m.titleLine(w), m.pills(), table, detail, m.status(w), m.help(w))
 }
 
 func (m *Model) titleLine(w int) string {
-	name := lipgloss.NewStyle().Foreground(cInk).Background(cAccent).Bold(true).Padding(0, 1).Render("🍋 scurvy")
-	what := sDim.Render("  " + m.host)
+	left := lipgloss.NewStyle().Foreground(cInk).Background(cAccent).Bold(true).Padding(0, 1).Render("🍋 scurvy") +
+		sDim.Render("  "+m.host)
 	if n := len(m.items); n > 0 {
-		what += sFaint.Render(fmt.Sprintf("  ·  %d containers", n))
+		left += sFaint.Render("  ·  " + plural(n, "container"))
 	}
-	left := name + what
 	if m.newer.Tag == "" {
 		return left
 	}
-	news := lipgloss.NewStyle().Foreground(cInk).Background(cFresh).Padding(0, 1).
+	news := lipgloss.NewStyle().Foreground(cInk).Background(cUpdate).Padding(0, 1).
 		Render("scurvy " + m.newer.Tag + " is out · press u")
 	return left + strings.Repeat(" ", max(1, w-lipgloss.Width(left)-lipgloss.Width(news))) + news
 }
 
-// pills count what was found, the gum way: a coloured dot and a number.
+// pills count the containers by state.
 func (m *Model) pills() string {
 	if len(m.items) == 0 {
 		return ""
 	}
-	var sick, due, fresh, unk, ok int
+	n := map[string]int{}
 	for _, it := range m.items {
-		switch {
-		case it.Level == scan.Sick:
-			sick++
-		case it.Level == scan.Due:
-			due++
-		case it.Level == scan.Fresh:
-			fresh++
-		case it.Err != "":
-			unk++
-		default:
-			ok++
-		}
+		n[stateOf(it.Level, failed(it)).word]++
 	}
+	levels := map[string]scan.Level{"eol": scan.EOL, "overdue": scan.Overdue, "update": scan.Update}
 	var out []string
-	add := func(n int, c color.Color, word string) {
-		if n > 0 {
-			out = append(out, lipgloss.NewStyle().Foreground(c).Render("●")+" "+sBold.Render(fmt.Sprint(n))+" "+sDim.Render(word))
+	for _, word := range []string{"eol", "overdue", "update", "unchecked", "current"} {
+		if n[word] == 0 {
+			continue
 		}
+		st := stateOf(levels[word], word == "unchecked")
+		label := word
+		if word == "update" && n[word] > 1 {
+			label = "updates"
+		}
+		out = append(out, st.style().Bold(true).Render(st.sign+" "+fmt.Sprint(n[word]))+" "+sDim.Render(label))
 	}
-	add(sick, cSick, "end of life")
-	add(due, cDue, "overdue")
-	add(fresh, cFresh, "fresh")
-	add(unk, cUnk, "not checked")
-	add(ok, cOK, "healthy")
 	return " " + strings.Join(out, "    ")
 }
 
-// table is the inside of the bordered table: its head and as many rows as
-// fit, scrolled so the pick stays in view.
+// table is the inside of the frame: sections and their containers,
+// scrolled so the pick stays in view.
 func (m *Model) table(inner, height int) string {
 	if m.scanning && len(m.items) == 0 {
 		p := m.done.Load()
@@ -181,19 +207,11 @@ func (m *Model) table(inner, height int) string {
 		return sErr.Render(m.err.Error())
 	}
 	c := m.columns(inner)
-	headStyle := lipgloss.NewStyle().Foreground(cDim).Bold(true)
-	lines := []string{
-		"  " + cell("CONTAINER", c.name, headStyle) + sp() + cell("SOURCE", c.source, headStyle) + sp() +
-			cell("RUNNING", c.running, headStyle) + sp() + cell("STATUS", c.status, headStyle) + sp() +
-			cell("FINDING", c.finding, headStyle),
-		sFaint.Render(strings.Repeat("─", inner)),
-	}
+	head := sFaint.Render("    " + pad("CONTAINER", c.name) + sp() + " " + sp() + pad("VERSION", c.version) + sp() +
+		padLeft("WAITS", ageW) + sp() + "WHAT")
+	lines := []string{head}
 	rows := m.rows()
 	room := height - len(lines)
-	if len(rows) == 0 {
-		msg := sOK.Render("⚓ All hands healthy.") + sDim.Render(" Not a single loose tooth.")
-		return strings.Join(lines, "\n") + "\n" + lipgloss.Place(inner, room, lipgloss.Center, lipgloss.Center, msg)
-	}
 	hidden := 0
 	if !m.all {
 		for _, it := range m.items {
@@ -202,8 +220,15 @@ func (m *Model) table(inner, height int) string {
 			}
 		}
 	}
+	if len(rows) == 0 {
+		msg := sOK.Render("✓ Every container is current.") + sDim.Render(" Not a single loose tooth.")
+		if hidden > 0 {
+			msg += "\n\n" + sFaint.Render("a shows all "+plural(hidden, "container"))
+		}
+		return head + "\n" + lipgloss.Place(inner, room, lipgloss.Center, lipgloss.Center, msg)
+	}
 	if hidden > 0 {
-		room-- // a line saying how many healthy ones are hidden
+		room--
 	}
 	if m.pick < m.top {
 		m.top = m.pick
@@ -212,85 +237,131 @@ func (m *Model) table(inner, height int) string {
 		m.top = m.pick - room + 1
 	}
 	m.top = max(0, min(m.top, max(0, len(rows)-room)))
-	for i := m.top; i < len(rows) && i < m.top+room; i++ {
-		lines = append(lines, m.row(rows, i, c, inner))
-	}
-	if hidden > 0 {
-		lines = append(lines, sFaint.Render(fmt.Sprintf("  + %d healthy · a shows them", hidden)))
+	end := min(len(rows), m.top+room)
+	for i := m.top; i < end; i++ {
+		lines = append(lines, m.line(rows, i, c, inner))
 	}
 	if m.top > 0 {
-		lines[2] = sFaint.Render(fmt.Sprintf("  ↑ %d more", m.top))
+		lines[1] = sFaint.Render(fmt.Sprintf("    ↑ %d more", m.top))
 	}
-	if end := m.top + room; end < len(rows) {
-		lines[len(lines)-1] = sFaint.Render(fmt.Sprintf("  ↓ %d more", len(rows)-end))
+	if end < len(rows) {
+		lines[len(lines)-1] = sFaint.Render(fmt.Sprintf("    ↓ %d more", len(rows)-end))
+	}
+	if hidden > 0 {
+		lines = append(lines, sFaint.Render(rule("  ", plural(hidden, "more container")+" current · a shows them", inner)))
 	}
 	return strings.Join(lines, "\n")
 }
 
-// row draws one table row; the picked one is lit across the table.
-func (m *Model) row(rows []row, i int, c cols, inner int) string {
+// rule is a quiet section line: ── text ───────.
+func rule(left, text string, width int) string {
+	head := left + "── " + text + " "
+	return head + strings.Repeat("─", max(2, width-lipgloss.Width(head)))
+}
+
+// line draws one row: a section header, or a container.
+func (m *Model) line(rows []row, i int, c cols, inner int) string {
 	r := rows[i]
 	picked := i == m.pick
-	bg := func(s lipgloss.Style) lipgloss.Style {
+	on := func(s lipgloss.Style) lipgloss.Style {
 		if picked {
 			return s.Background(cPickBg)
 		}
 		return s
 	}
-	cursor := bg(lipgloss.NewStyle()).Render("  ")
+	cursor := on(lipgloss.NewStyle()).Render("  ")
 	if picked {
-		cursor = bg(sAccent.Bold(true)).Render("▌ ")
+		cursor = on(sAccent.Bold(true)).Render("▌ ")
 	}
-	gapS := bg(lipgloss.NewStyle()).Render(strings.Repeat(" ", gap))
-	nameStyle := bg(lipgloss.NewStyle().Foreground(cText))
-	if picked {
-		nameStyle = nameStyle.Foreground(cAccent).Bold(true)
-	}
-
 	if r.head {
-		worst, unk, hurt, total := scan.OK, false, 0, 0
-		for _, it := range r.items {
-			worst = max(worst, it.Level)
-			unk = unk || failed(it)
-			if it.Level > scan.OK {
-				hurt++
-			}
-		}
-		for _, it := range m.items {
-			if it.Project.Name == r.group {
-				total++
-			}
-		}
-		what := plural(total, "container")
-		if hurt > 0 {
-			what += fmt.Sprintf(" · %d to update", hurt)
-		}
-		label, st := badge(worst, unk)
-		return cursor + cell(r.group, c.name, nameStyle.Bold(true)) + gapS +
-			cell("stack", c.source, bg(sFaint)) + gapS + cell("", c.running, bg(sFaint)) + gapS +
-			badgeCell(label, c.status, bg(st), bg(lipgloss.NewStyle())) + gapS +
-			cell(what, c.finding, bg(sDim))
+		return cursor + m.header(r, inner-2, on)
 	}
 
 	it := r.items[0]
-	n := it.Name()
-	if r.sub {
-		branch := "├ "
-		if i+1 >= len(rows) || !rows[i+1].sub || rows[i+1].group != r.group {
-			branch = "└ "
-		}
-		n = branch + n
-	} else if it.Project.Name != "" && it.Project.Name != it.Service {
-		n = it.Project.Name + "/" + n
+	st := stateOf(it.Level, failed(it))
+	sign, _ := source(it)
+	blank := on(lipgloss.NewStyle())
+	nameStyle := on(lipgloss.NewStyle().Foreground(cText))
+	if picked {
+		nameStyle = nameStyle.Bold(true)
 	}
-	label, st := badge(it.Level, failed(it))
-	src := bg(sDim)
+	srcStyle := on(sDim)
 	if it.Kind == scan.Built {
-		src = bg(lipgloss.NewStyle().Foreground(cAccent))
+		srcStyle = on(sAccent)
 	}
-	return cursor + cell(n, c.name, nameStyle) + gapS + cell(it.Source(), c.source, src) + gapS +
-		cell(it.Current, c.running, bg(sDim)) + gapS + badgeCell(label, c.status, bg(st), bg(lipgloss.NewStyle())) + gapS +
-		cell(finding(it), c.finding, bg(lipgloss.NewStyle().Foreground(cText)))
+
+	cur, next := version(it)
+	ver := on(sDim).Render(cur)
+	used := lipgloss.Width(cur)
+	if next != "" {
+		ver += on(sFaint).Render(" → ") + on(st.style().Bold(true)).Render(next)
+		used += 3 + lipgloss.Width(next)
+	}
+	if used > c.version {
+		ver = ansi.Truncate(ver, c.version, "…")
+		used = c.version
+	}
+	ver += blank.Render(strings.Repeat(" ", c.version-used))
+
+	age, what := "", ""
+	if f, ok := it.Top(); ok {
+		what = f.Short
+		if !f.Since.IsZero() {
+			age = days(time.Since(f.Since))
+		}
+	} else if it.Err != "" {
+		what = "not checked: " + it.Err
+	}
+	g := blank.Render(sp())
+	return cursor + on(st.style().Bold(true)).Render(st.sign+" ") + nameStyle.Render(pad(it.Name(), c.name)) + g +
+		srcStyle.Render(sign) + g + ver + g + on(st.style()).Render(padLeft(age, ageW)) + g +
+		on(lipgloss.NewStyle().Foreground(cText)).Render(pad(what, c.what))
+}
+
+// header is a section's line: its name and what its containers need.
+func (m *Model) header(r row, width int, on func(lipgloss.Style) lipgloss.Style) string {
+	title := r.group
+	if title == "" {
+		title = "standalone"
+	}
+	n := map[scan.Level]int{}
+	worst, external, unchecked := scan.OK, false, 0
+	for _, it := range r.items {
+		n[it.Level]++
+		worst = max(worst, it.Level)
+		external = external || it.Kind == scan.Loose && it.Project.Name != ""
+		if failed(it) {
+			unchecked++
+		}
+	}
+	var parts []string
+	for _, l := range []scan.Level{scan.EOL, scan.Overdue, scan.Update} {
+		if n[l] > 0 {
+			word := l.Word()
+			if l == scan.Update && n[l] > 1 {
+				word = "updates"
+			}
+			parts = append(parts, fmt.Sprintf("%d %s", n[l], word))
+		}
+	}
+	if unchecked > 0 {
+		parts = append(parts, fmt.Sprintf("%d unchecked", unchecked))
+	}
+	if current := r.total - n[scan.EOL] - n[scan.Overdue] - n[scan.Update] - unchecked; current > 0 {
+		parts = append(parts, fmt.Sprintf("%d current", current))
+	}
+	if external {
+		parts = append(parts, "↗ external")
+	}
+	nameStyle := on(lipgloss.NewStyle().Foreground(cText).Bold(true))
+	if r.group == "" {
+		nameStyle = on(sDim.Bold(true))
+	}
+	left := on(sFaint).Render("── ") + nameStyle.Render(title) + on(lipgloss.NewStyle()).Render(" ")
+	right := on(lipgloss.NewStyle()).Render(" ") + on(stateOf(worst, worst == scan.OK && unchecked > 0).style()).Render(strings.Join(parts, " · ")) +
+		on(sFaint).Render(" ──")
+	fill := max(2, width-lipgloss.Width(left)-lipgloss.Width(right))
+	return left + on(sFaint).Render(strings.Repeat("─", fill)) + right
 }
 
 // detail is the panel under the table: everything about the picked row.
@@ -298,65 +369,80 @@ func (m *Model) detail(r row, w, h int) string {
 	var title string
 	var lines []string
 	if r.head {
-		title = r.group
+		t := r.group
+		if t == "" {
+			t = "standalone"
+		}
+		title = sBold.Render(t) + sFaint.Render("  "+plural(r.total, "container"))
 		todo := targets(r)
 		if len(todo) == 0 {
-			lines = append(lines, "These containers come from another tool, not from a compose file.", "Update them where they were started.")
+			lines = append(lines, sDim.Render("↗ These come from another tool, not from a compose file. Update them where they were started."))
 		} else {
 			var names []string
 			for _, it := range todo {
 				names = append(names, it.Name())
 			}
-			lines = append(lines, "Enter updates "+strings.Join(names, ", ")+".")
+			lines = append(lines, sAccent.Render("⏎")+" updates "+strings.Join(names, ", "))
 		}
 		for _, it := range r.items {
-			if it.Level > scan.OK && len(it.Findings) > 0 {
-				lines = append(lines, sDim.Render(it.Name()+": ")+it.Findings[0].Text)
+			if f, ok := it.Top(); ok {
+				st := stateOf(f.Level, false)
+				lines = append(lines, st.style().Render(st.sign)+" "+sDim.Render(it.Name()+":")+" "+f.Text)
 			}
 		}
 	} else {
 		it := r.items[0]
-		title = it.Name() + sFaint.Render("  "+it.Image)
+		st := stateOf(it.Level, failed(it))
+		sign, words := source(it)
+		title = st.style().Bold(true).Render(st.sign+" "+st.word) + "  " + sBold.Render(it.Name()) + sFaint.Render("  "+it.Image)
+		lines = append(lines, sDim.Render(sign+" "+words))
 		for _, f := range it.Findings {
-			lines = append(lines, dot(f.Level)+" "+f.Text)
+			fs := stateOf(f.Level, false)
+			mark := fs.style().Render(fs.sign)
+			if f.Level == scan.OK {
+				mark = sFaint.Render("·")
+			}
+			lines = append(lines, mark+" "+f.Text)
 		}
 		if it.Err != "" {
-			lines = append(lines, sErr.Render("●")+" could not check: "+it.Err)
+			lines = append(lines, sDim.Render("? not checked: "+it.Err))
 		}
-		if it.Bump != nil {
+		switch {
+		case !it.Updatable():
+		case it.Hook != "":
+			lines = append(lines, sAccent.Render("⏎")+" runs "+scan.HookFile+" of "+it.Project.Name)
+		case it.Bump != nil:
 			file := it.Bump.File
 			if rel, err := filepath.Rel(it.Project.Dir, file); err == nil && !strings.HasPrefix(rel, "..") {
 				file = rel
 			}
-			lines = append(lines, sAccent.Render("→")+" Enter writes "+it.Bump.New+" into "+file+".")
-		}
-		if len(lines) == 0 {
-			lines = append(lines, sOK.Render("●")+" Nothing newer found.")
+			lines = append(lines, sAccent.Render("⏎")+" writes "+tagOf(it.Bump.New)+" into "+file+", then "+verb(it)+" and recreates")
+		case it.Level > scan.OK:
+			pull := ""
+			if it.Pull != "" {
+				pull = "git pull, then "
+			}
+			lines = append(lines, sAccent.Render("⏎")+" "+pull+verb(it)+" and recreates")
 		}
 	}
-	inner := h - 2 - 1
-	if len(lines) > inner {
-		lines = append(lines[:inner-1], sFaint.Render(fmt.Sprintf("… %d more", len(lines)-inner+1)))
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cFaint).Padding(0, 1).Width(w).Height(h)
+	room := h - box.GetVerticalFrameSize() - 1
+	if len(lines) > room {
+		lines = append(lines[:room-1], sFaint.Render(fmt.Sprintf("… %d more", len(lines)-room+1)))
 	}
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cAccent).Padding(0, 1).Width(w).Height(h)
 	iw := w - box.GetHorizontalFrameSize()
-	body := []string{ansi.Truncate(sBold.Render(title), iw, "…")}
+	body := []string{ansi.Truncate(title, iw, "…")}
 	for _, l := range lines {
 		body = append(body, ansi.Truncate(l, iw, "…"))
 	}
 	return box.Render(strings.Join(body, "\n"))
 }
 
-func dot(l scan.Level) string {
-	switch l {
-	case scan.Sick:
-		return lipgloss.NewStyle().Foreground(cSick).Render("●")
-	case scan.Due:
-		return lipgloss.NewStyle().Foreground(cDue).Render("●")
-	case scan.Fresh:
-		return lipgloss.NewStyle().Foreground(cFresh).Render("●")
+func verb(it scan.Item) string {
+	if it.Kind == scan.Built {
+		return "rebuilds"
 	}
-	return sFaint.Render("●")
+	return "pulls"
 }
 
 // status is the line above the help: a question, or what just happened.
@@ -382,66 +468,50 @@ func (m *Model) status(w int) string {
 	return ansi.Truncate(s, w, "…")
 }
 
-// help is gum's help line: keys bright, words dim, dots between.
+// help is the key line: keys bright, words dim, dots between.
 func (m *Model) help(w int) string {
 	k := lipgloss.NewStyle().Foreground(cDim).Bold(true)
 	d := sFaint
-	sep := d.Render(" • ")
 	self := "check scurvy"
 	if m.newer.Tag != "" {
 		self = "update scurvy"
 	}
+	all := "show all"
+	if m.all {
+		all = "hide current"
+	}
 	parts := []string{
 		k.Render("↑/↓") + " " + d.Render("move"),
 		k.Render("enter") + " " + d.Render("update"),
-		k.Render("a") + " " + d.Render(map[bool]string{true: "hide healthy", false: "show all"}[m.all]),
+		k.Render("a") + " " + d.Render(all),
 		k.Render("r") + " " + d.Render("look again"),
 		k.Render("u") + " " + d.Render(self),
 		k.Render("q") + " " + d.Render("quit"),
 	}
-	return ansi.Truncate(" "+strings.Join(parts, sep), w, "…")
-}
-
-// finding is the one line about an item: its worst finding, or why it
-// could not be checked.
-func finding(it scan.Item) string {
-	n := 0
-	for _, f := range it.Findings {
-		if f.Level > scan.OK {
-			n++
-		}
-	}
-	if n > 0 {
-		s := it.Findings[0].Text
-		if n > 1 {
-			s += fmt.Sprintf("  +%d", n-1)
-		}
-		return s
-	}
-	if it.Err != "" {
-		return "could not check: " + it.Err
-	}
-	return ""
+	return ansi.Truncate(" "+strings.Join(parts, d.Render(" • ")), w, "…")
 }
 
 func confirmText(r row) string {
 	todo := targets(r)
 	if r.head {
-		return fmt.Sprintf("Update %s of %s?", plural(len(todo), "container"), r.group)
+		return fmt.Sprintf("Update %s of %s?", plural(len(todo), "container"), name(r))
 	}
 	it := todo[0]
-	verb := "Pull"
+	v := "Pull"
 	if it.Kind == scan.Built {
-		verb = "Rebuild"
+		v = "Rebuild"
 	}
 	if it.Bump != nil {
-		return fmt.Sprintf("Raise %s to %s, %s and recreate it?", it.Name(), it.Latest, strings.ToLower(verb))
+		return fmt.Sprintf("Raise %s to %s, %s and recreate it?", it.Name(), tagOf(it.Bump.New), strings.ToLower(v))
 	}
 	if it.Level == scan.OK {
-		return fmt.Sprintf("%s looks healthy. %s and recreate it anyway?", it.Name(), verb)
+		return fmt.Sprintf("%s is current. %s and recreate it anyway?", it.Name(), v)
 	}
-	return fmt.Sprintf("%s %s and recreate it?", verb, it.Name())
+	return fmt.Sprintf("%s %s and recreate it?", v, it.Name())
 }
+
+// days says how long, the short way: 0d, 7d, 120d.
+func days(d time.Duration) string { return fmt.Sprintf("%dd", int(d.Hours()/24)) }
 
 func plural(n int, word string) string {
 	if n == 1 {
@@ -452,16 +522,12 @@ func plural(n int, word string) string {
 
 func sp() string { return strings.Repeat(" ", gap) }
 
-// cell fits text into n cells in a style.
-func cell(text string, n int, st lipgloss.Style) string {
-	if lipgloss.Width(text) > n {
-		text = ansi.Truncate(text, n, "…")
+func pad(s string, n int) string {
+	w := lipgloss.Width(s)
+	if w > n {
+		return ansi.Truncate(s, n, "…")
 	}
-	return st.Render(text + strings.Repeat(" ", max(0, n-lipgloss.Width(text))))
+	return s + strings.Repeat(" ", n-w)
 }
 
-// badgeCell puts a badge at the start of a cell.
-func badgeCell(label string, n int, st, rest lipgloss.Style) string {
-	b := st.Render(" " + label + " ")
-	return b + rest.Render(strings.Repeat(" ", max(0, n-lipgloss.Width(b))))
-}
+func padLeft(s string, n int) string { return strings.Repeat(" ", max(0, n-lipgloss.Width(s))) + s }
