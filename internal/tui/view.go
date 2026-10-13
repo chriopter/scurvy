@@ -89,6 +89,8 @@ func source(it scan.Item) (string, string) {
 		return "@", "pinned by digest"
 	case "external":
 		return "↗", "started by " + it.Project.Name + ", not from a compose file here"
+	case "aio":
+		return "↗", "started by Nextcloud AIO, updated through its mastercontainer"
 	case "docker run":
 		return "▸", "not started by compose"
 	}
@@ -484,6 +486,8 @@ func details(r row) (string, []string) {
 // plan says in words what Enter will do with a container.
 func plan(it scan.Item) string {
 	switch {
+	case it.Kind == scan.AIO:
+		return "asks Nextcloud AIO to update all its containers, with AIO's backup if one is set up; scurvy cannot go back"
 	case it.Hook != "":
 		return "backs up, runs " + scan.HookFile + ", waits until healthy"
 	case it.Kind == scan.Built && it.Pull != "":
@@ -587,6 +591,13 @@ func (m *Model) popup(w int) string {
 	lines = append(lines, "")
 	if m.dryRun {
 		lines = append(lines, sDue.Render("dry run: shown, not made"))
+	}
+	aio := false
+	for _, it := range todo {
+		aio = aio || it.Kind == scan.AIO
+	}
+	if aio {
+		lines = append(lines, sDue.Render("Nextcloud AIO updates itself; scurvy cannot put it back"))
 	}
 	lines = append(lines, sDim.Render("backed up first, put back if it fails"), "",
 		lipgloss.NewStyle().Foreground(cActive).Bold(true).Render("y")+sDim.Render(" / enter: update   ")+

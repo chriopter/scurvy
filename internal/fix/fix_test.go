@@ -238,3 +238,15 @@ func TestBackupsGoBackToBothNames(t *testing.T) {
 		t.Errorf("the backup must go back to the name it ran as and the name compose starts:\n%s", strings.Join(f.ran, "\n"))
 	}
 }
+
+func TestPlansAIO(t *testing.T) {
+	aio := docker.Project{Name: "nextcloud-aio"}
+	var items []scan.Item
+	for _, n := range []string{"nextcloud-aio-apache", "nextcloud-aio-database"} {
+		items = append(items, scan.Item{Kind: scan.AIO, Project: aio, Container: docker.Container{Name: n}, Image: "x:latest"})
+	}
+	plans, refused := Plans(items[:1], items, false)
+	if len(refused) != 0 || len(plans) != 1 || !plans[0].AIO || len(plans[0].Items) != 2 {
+		t.Fatalf("AIO updates as a whole: %+v %v", plans, refused)
+	}
+}

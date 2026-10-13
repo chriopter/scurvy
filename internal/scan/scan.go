@@ -101,6 +101,19 @@ func Scan(ctx context.Context, progress func(done, total int)) ([]Item, error) {
 		svcs = append(svcs, svc)
 	}
 
+	// Nextcloud All-in-One starts its containers itself; with its
+	// mastercontainer here, scurvy can ask it to update them.
+	for _, it := range items {
+		if it.Container.Name == Mastercontainer {
+			for _, x := range items {
+				if x.Kind == Loose && x.Project.Name == "nextcloud-aio" {
+					x.Kind = AIO
+				}
+			}
+			break
+		}
+	}
+
 	var done atomic.Int32
 	if progress != nil {
 		progress(0, len(items))

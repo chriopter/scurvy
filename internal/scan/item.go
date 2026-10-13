@@ -18,7 +18,12 @@ const (
 	Pulled Kind = "pulled" // compose pulls it from a registry
 	Built  Kind = "built"  // compose builds it from a Dockerfile
 	Loose  Kind = "loose"  // not up to compose here: shown, not updated
+	AIO    Kind = "aio"    // started by Nextcloud AIO, which updates them itself
 )
+
+// Mastercontainer is the container of Nextcloud All-in-One that starts
+// and updates the others.
+const Mastercontainer = "nextcloud-aio-mastercontainer"
 
 // Level is how much a container asks for an update.
 type Level int
@@ -96,6 +101,8 @@ func (it Item) Source() string {
 	switch it.Kind {
 	case Built:
 		return "own build"
+	case AIO:
+		return "aio"
 	case Loose:
 		if it.Project.Name != "" {
 			return "external"
