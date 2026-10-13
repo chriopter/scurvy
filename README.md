@@ -28,10 +28,10 @@ Enter keeps the running image as a backup, updates, and waits until the containe
 | type | image comes from | Enter |
 |---|---|---|
 | image | a registry, moving tag (`:latest`) | pulls, restarts |
-| version | a registry, fixed version (`:16.4`) | writes `16.6` into the compose file, pulls, restarts |
+| pinned 16.4 | a registry, fixed version (`:16.4`) | writes `16.6` into the compose file, pulls, restarts |
 | build | a local Dockerfile | raises a fixed `FROM`, rebuilds, restarts |
 | build | a local Dockerfile in a git clone | `git pull`, rebuilds, restarts |
-| digest | a registry, fixed digest (`@sha256:…`) | nothing |
+| pinned digest | a registry, fixed digest (`@sha256:…`) | nothing |
 | external | another tool, or `docker run` | nothing |
 
 A stack with its own `docker-update.sh` gets that script run instead.

@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/chriopter/scurvy/internal/registry"
 	"github.com/chriopter/scurvy/internal/scan"
 )
 
@@ -259,6 +260,7 @@ func (m *Model) columns(rows []row, inner int) cols {
 	for _, r := range rows {
 		if !r.head {
 			c.name = max(c.name, lipgloss.Width(short(r.items[0], r.group)))
+			c.kind = max(c.kind, min(lipgloss.Width(kindWord(r.items[0])), 18))
 		}
 	}
 	c.name = min(c.name, max(8, inner-c.state-c.kind-waitW-6))
@@ -277,13 +279,15 @@ func kindWord(it scan.Item) string {
 	case "own build":
 		return "build"
 	case "pinned":
-		return "version"
+		return "pinned " + registry.Parse(it.Image).Tag
+	case "digest":
+		return "pinned digest"
 	case "registry":
 		return "image"
 	case "docker run":
 		return "run"
 	}
-	return it.Source() // digest, external
+	return it.Source() // external
 }
 
 // line draws one row: a group's name over a line, or a container with
