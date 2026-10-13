@@ -673,7 +673,6 @@ func (m *Model) popup(w int) string {
 		Padding(1, 3).Background(lipgloss.Color("235")).Render(strings.Join(lines, "\n"))
 }
 
-
 func plural(n int, word string) string {
 	if n == 1 {
 		return "1 " + word
