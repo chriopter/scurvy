@@ -263,13 +263,13 @@ func (m *Model) columns(rows []row, inner int) cols {
 			c.kind = max(c.kind, min(lipgloss.Width(kindWord(r.items[0])), 18))
 		}
 	}
-	c.name = min(c.name, max(8, inner-c.state-c.kind-waitW-6))
+	c.name = min(c.name, max(8, inner-2-c.state-c.kind-waitW-6))
 	return c
 }
 
 // header names the columns, as k9s and docker ps do.
 func (c cols) header(inner int) string {
-	h := fit("CONTAINER", c.name) + "  " + fit("STATE", c.state) + "  " + fit("TYPE", c.kind) + "  " + fmt.Sprintf("%*s", waitW, "WAIT")
+	h := "  " + fit("CONTAINER", c.name) + "  " + fit("STATE", c.state) + "  " + fit("TYPE", c.kind) + "  " + fmt.Sprintf("%*s", waitW, "WAIT")
 	return lipgloss.NewStyle().Foreground(cDim).Bold(true).Render(fit(h, inner))
 }
 
@@ -314,7 +314,11 @@ func (m *Model) line(r row, picked bool, c cols, inner int) string {
 		waiting = fmt.Sprintf("%dd", int(time.Since(f.Since).Hours()/24))
 	}
 	gap := on(lipgloss.NewStyle()).Render("  ")
-	line := cellOn(on(sText).Render(short(it, r.group)), c.name, on) + gap +
+	mark := on(lipgloss.NewStyle()).Render("  ")
+	if m.marked[it.Container.ID] {
+		mark = on(lipgloss.NewStyle().Foreground(cActive).Bold(true)).Render("● ")
+	}
+	line := mark + cellOn(on(sText).Render(short(it, r.group)), c.name, on) + gap +
 		cellOn(on(st.style()).Render(st.word), c.state, on) + gap +
 		cellOn(on(sDim).Render(kindWord(it)), c.kind, on) + gap +
 		on(st.style()).Render(fmt.Sprintf("%*s", waitW, waiting))
@@ -531,13 +535,13 @@ func (m *Model) status(w int) string {
 			s += sFaint.Render("   " + strings.Join(m.newer.Points, " · "))
 		}
 	case m.confirm:
-		if r, ok := m.picked(); ok {
-			s = q(confirmText(r, m.dryRun))
-		}
+		s = q(m.confirmText())
 	case m.scanning && len(m.items) > 0:
 		s = " " + sDim.Render("looking again…")
 	case m.note != "":
 		s = " " + m.note
+	case len(m.marked) > 0:
+		s = " " + sBold.Render(plural(len(m.marked), "container")+" marked") + sDim.Render(" · enter updates them · space unmarks")
 	}
 	return ansi.Truncate(s, w, "…")
 }
@@ -554,6 +558,7 @@ func (m *Model) help(w int) string {
 	}
 	parts := []string{
 		k.Render("↑/↓") + " " + sFaint.Render("move"),
+		k.Render("space") + " " + sFaint.Render("mark"),
 		k.Render("enter") + " " + sFaint.Render("update"),
 		k.Render("a") + " " + sFaint.Render(all),
 		k.Render("r") + " " + sFaint.Render("look again"),
@@ -563,13 +568,13 @@ func (m *Model) help(w int) string {
 	return ansi.Truncate(" "+strings.Join(parts, sFaint.Render(" • ")), w, "…")
 }
 
-func confirmText(r row, dry bool) string {
-	todo := targets(r)
-	s := fmt.Sprintf("Update %s?", todo[0].Name())
-	if r.head || len(todo) > 1 {
-		s = fmt.Sprintf("Update %s of %s?", plural(len(todo), "container"), name(r))
+func (m *Model) confirmText() string {
+	todo, what := m.todo()
+	s := fmt.Sprintf("Update %s?", what)
+	if len(todo) > 1 && len(m.marked) == 0 {
+		s = fmt.Sprintf("Update %s of %s?", plural(len(todo), "container"), what)
 	}
-	if dry {
+	if m.dryRun {
 		s += " (dry run: only shown)"
 	}
 	return s

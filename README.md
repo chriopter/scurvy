@@ -1,6 +1,6 @@
 # 🍋 scurvy
 
-See which docker containers on a server are out of date, and update them with Enter.
+scurvy shows which docker containers on a server are out of date, and updates them safely with Enter: it keeps a backup, waits until the containers are healthy, and puts everything back if anything fails. One program, no config, no daemon.
 
 <img src="docs/screen.png" alt="scurvy: containers by stack on the left, details on the right" width="860">
 
@@ -8,14 +8,16 @@ See which docker containers on a server are out of date, and update them with En
 
 ```sh
 curl -fsSL https://github.com/chriopter/scurvy/releases/latest/download/install.sh | sudo bash
-scurvy        # -n: show every step of an update, run none
+scurvy
 ```
 
-## How it works
+## What it checks
 
-scurvy finds the running containers and reads their compose files and Dockerfiles. It asks the registries what each tag points to now, and [endoflife.date](https://endoflife.date) whether the base still gets fixes; nothing is pulled to check.
+scurvy finds the running containers and reads their compose files and Dockerfiles. For each it asks the registry what its tag points to now, looks for newer versions of a fixed one, and asks [endoflife.date](https://endoflife.date) whether its base still gets fixes. Nothing is pulled to check.
 
-| status | means |
+## What it shows
+
+| state | means |
 |---|---|
 | 🟢 up to date | nothing newer |
 | 🔵 update available | a new image or version is there |
@@ -23,7 +25,11 @@ scurvy finds the running containers and reads their compose files and Dockerfile
 | 🔴 end of life | the base (alpine, debian, python, node, …) gets no fixes any more |
 | ⚪ not checked | the registry did not answer, or the image is private |
 
-Enter keeps the running image as a backup, updates, and waits until the containers are healthy. If anything fails, it puts everything back.
+Containers of one compose stack stand together. The right panel tells everything about the picked one.
+
+## What Enter does
+
+<kbd>Enter</kbd> updates the picked container or stack; <kbd>space</kbd> marks several to update at once.
 
 | type | image comes from | Enter |
 |---|---|---|
@@ -34,9 +40,16 @@ Enter keeps the running image as a backup, updates, and waits until the containe
 | pinned digest | a registry, fixed digest (`@sha256:…`) | nothing |
 | external | another tool, or `docker run` | nothing |
 
-A stack with its own `docker-update.sh` gets that script run instead.
+A stack with its own `docker-update.sh` gets that script run instead. Before every update the running image is kept as `<image>:bak-<time>`; after it, scurvy waits until the containers are healthy. [Details](docs/how.md)
 
-[Details](docs/how.md)
+## Command line
+
+```sh
+scurvy -n          # the screen, but Enter only shows what it would run
+scurvy list        # the update state of every container, as text: for scripts and checks
+scurvy fix web     # update one container, or a stack, without the screen
+scurvy update      # update scurvy itself
+```
 
 ## Development
 

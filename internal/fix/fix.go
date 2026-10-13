@@ -128,7 +128,7 @@ func (p Plan) services(kind scan.Kind) []string {
 func (p Plan) Name() string { return p.Project.Name }
 
 // backup is a running image kept under a tag, and the reference it ran as.
-type backup struct{ tag, ref string }
+type backup struct{ tag, ref, service string }
 
 // Run carries out the plan. On failure it has put everything back, and
 // says so; the error tells what failed.
@@ -150,7 +150,8 @@ func Run(ctx context.Context, p Plan, out io.Writer) error {
 	var backups []backup
 	for _, it := range p.Items {
 		ref := registry.Parse(it.Running)
-		b := backup{tag: ref.Name + ":bak-" + stamp, ref: ref.Name + ":" + ref.Tag}
+		// The service is in the tag: two services on one image keep two backups.
+		b := backup{tag: ref.Name + ":bak-" + stamp + "-" + tagSafe(it.Service), ref: ref.Name + ":" + ref.Tag, service: tagSafe(it.Service)}
 		if err := r.run("", "docker", "tag", it.Container.ImageID, b.tag); err != nil {
 			return err
 		}
@@ -217,7 +218,7 @@ func Run(ctx context.Context, p Plan, out io.Writer) error {
 
 	// Tidy up. A failure here is told; the update stands.
 	for _, b := range backups {
-		r.prune(registry.Parse(b.tag).Name)
+		r.prune(registry.Parse(b.tag).Name, b.service)
 	}
 	r.warn(r.run("", "docker", "image", "prune", "-f"))
 	if len(p.services(scan.Built)) > 0 {
@@ -272,15 +273,15 @@ func (r *runner) gitPull(dir string) (string, error) {
 	return strings.TrimSpace(string(head)), r.run(dir, "git", "pull", "--ff-only")
 }
 
-// prune removes all but the newest backup tags of an image.
-func (r *runner) prune(name string) {
+// prune removes all but the newest backup tags of a service's image.
+func (r *runner) prune(name, service string) {
 	out, err := exec.CommandContext(r.ctx, "docker", "images", name, "--format", "{{.Tag}}").Output()
 	if err != nil {
 		return
 	}
 	var baks []string
 	for _, t := range strings.Fields(string(out)) {
-		if strings.HasPrefix(t, "bak-") {
+		if strings.HasPrefix(t, "bak-") && strings.HasSuffix(t, "-"+service) {
 			baks = append(baks, t)
 		}
 	}
@@ -370,6 +371,14 @@ func (r *runner) run(dir, name string, args ...string) error {
 		return fmt.Errorf("%s failed: %w", shell(append([]string{name}, args[:min(2, len(args))]...)...), err)
 	}
 	return nil
+}
+
+var notInTag = regexp.MustCompile(`[^A-Za-z0-9_.-]`)
+
+// tagSafe makes s fit into an image tag.
+func tagSafe(s string) string {
+	s = notInTag.ReplaceAllString(s, "-")
+	return s[:min(len(s), 60)]
 }
 
 var plainArg = regexp.MustCompile(`^[A-Za-z0-9_./:@=+,-]+$`)
