@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Install scurvy from the latest release, as root:
+#   curl -fsSL https://github.com/chriopter/scurvy/releases/latest/download/install.sh | sudo bash
+# Refuses to install unless the release is signed by scurvy's release key,
+# the same key scurvy checks its own updates with.
+set -euo pipefail
+
+repo=chriopter/scurvy
+pubkey="8sN378v+F3O0Mi6lNf1qql+qevqXyMMf1y9iw+f0VdU=" # Ed25519, raw, base64
+dest=/usr/local/bin/scurvy
+
+case $(uname -m) in
+  x86_64) arch=amd64 ;;
+  aarch64 | arm64) arch=arm64 ;;
+  *) echo "scurvy is built for x86_64 and arm64 only" >&2; exit 1 ;;
+esac
+asset="scurvy-linux-$arch.tar.gz"
+(( EUID == 0 )) || { echo "run the installer as root (… | sudo bash)" >&2; exit 1; }
+for tool in curl tar openssl sha256sum base64 install; do
+  command -v "$tool" >/dev/null || { echo "the installer needs $tool" >&2; exit 1; }
+done
+
+# Resolve the release once, so every file comes from the same one.
+tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest")
+tag=${tag##*/}
+[[ $tag == v* ]] || { echo "could not find the latest release" >&2; exit 1; }
+base="https://github.com/$repo/releases/download/$tag"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+cd "$work"
+
+echo "downloading scurvy $tag"
+for f in "$asset" SHA256SUMS SHA256SUMS.sig; do
+  curl -fsSLO "$base/$f"
+done
+
+# The checksums must carry the release key's signature and name this version.
+{ printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00'; printf %s "$pubkey" | base64 -d; } > key.der
+openssl pkey -pubin -inform DER -in key.der -out key.pem
+base64 -d SHA256SUMS.sig > sig.bin
+openssl pkeyutl -verify -pubin -inkey key.pem -rawin -in SHA256SUMS -sigfile sig.bin >/dev/null ||
+  { echo "the release signature does not check out; not installing" >&2; exit 1; }
+grep -qx "version $tag" SHA256SUMS || { echo "the release is signed for another version; not installing" >&2; exit 1; }
+grep " $asset\$" SHA256SUMS | sha256sum --check --quiet --strict
+echo "verified: signed by the scurvy release key"
+
+tar -xzf "$asset" scurvy
+install -D -m 755 scurvy "$dest"
+echo "installed $("$dest" version) to $dest"
+echo
+echo "next: scurvy"

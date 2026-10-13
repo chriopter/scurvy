@@ -1,0 +1,18 @@
+{
+  "name": "Protect from AI Errors",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "include": ["~DEFAULT_BRANCH"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    { "type": "required_linear_history" },
+    { "type": "required_signatures" }
+  ]
+}
