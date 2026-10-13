@@ -22,6 +22,20 @@ jobs:
           fetch-depth: 0   # tags and history for the release notes
           persist-credentials: false
 
+      # Only a signed vX.Y.Z tag on a commit of main is released: nothing of
+      # this checkout runs, and the key is not touched, before that holds.
+      - name: Check the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::$TAG is no vX.Y.Z tag"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$TAG is not on main"; exit 1; }
+          obj=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')
+          [[ $obj == tag\ * ]] || { echo "::error::$TAG is a lightweight tag; sign it (git tag -s)"; exit 1; }
+          verified=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/${obj#tag }" --jq .verification.verified)
+          [[ $verified == true ]] || { echo "::error::$TAG carries no signature GitHub verifies"; exit 1; }
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod

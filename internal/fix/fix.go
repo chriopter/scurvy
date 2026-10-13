@@ -143,7 +143,7 @@ func Run(ctx context.Context, p Plan, out io.Writer) error {
 		}
 		defer unlock()
 	}
-	r.say(fmt.Sprintf("🍋 updating %s: %s", p.Name(), strings.Join(p.services(""), ", ")))
+	r.say(fmt.Sprintf("updating %s: %s", p.Name(), strings.Join(p.services(""), ", ")))
 
 	// Keep what runs, so it can come back.
 	stamp := time.Now().Format(stampTime)

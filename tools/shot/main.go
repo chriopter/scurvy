@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	fmt.Print(tui.Snapshot("harbor", items(), 112, 32, 1))
+	fmt.Print(tui.Snapshot("harbor", items(), 112, 20, 1))
 }
 
 func ago(days int) time.Time { return time.Now().Add(-time.Duration(days) * 24 * time.Hour) }

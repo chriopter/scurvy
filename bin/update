@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Pull the latest scurvy and install it again.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+git pull --ff-only
+exec bin/setup
