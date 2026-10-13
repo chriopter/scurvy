@@ -57,3 +57,18 @@ func newerTags(tags []string, cur string) (minor, major string) {
 	}
 	return minor, major
 }
+
+// majorOf is the start every newer version of the same major shares:
+// "10." for 10.11.11, "v2." for v2.3.
+func majorOf(tag string) string {
+	v := strings.HasPrefix(tag, "v")
+	n := numbers(tag)
+	if len(n) == 0 {
+		return ""
+	}
+	p := strconv.Itoa(n[0]) + "."
+	if v {
+		p = "v" + p
+	}
+	return p
+}

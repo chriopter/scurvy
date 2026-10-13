@@ -34,6 +34,7 @@ type row struct {
 // Model is the screen's state.
 type Model struct {
 	host, version string
+	dryRun        bool // Enter shows what it would run, and runs nothing
 
 	items    []scan.Item
 	all      bool // show healthy ones too
@@ -74,9 +75,9 @@ type installedMsg struct {
 
 // Run shows the screen until the user leaves. It returns a program to
 // start in its place when scurvy updated itself.
-func Run(version string) (string, error) {
+func Run(version string, dryRun bool) (string, error) {
 	host, _ := os.Hostname()
-	m := &Model{host: host, version: version, done: new(atomic.Int64), scanning: true}
+	m := &Model{host: host, version: version, dryRun: dryRun, done: new(atomic.Int64), scanning: true}
 	_, err := tea.NewProgram(m).Run()
 	return m.Restart, err
 }
@@ -201,9 +202,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.items, m.err = msg.items, msg.err
 		m.pick = min(m.pick, max(0, len(m.rows())-1))
 	case fixedMsg:
-		if msg.err != nil {
+		switch {
+		case msg.err != nil:
 			m.note = sDue.Render("✗ " + msg.name + " still has scurvy")
-		} else {
+		case m.dryRun:
+			m.note = sDim.Render("dry run: " + msg.name + " was not changed")
+		default:
 			m.note = sOK.Render("✓ " + msg.name + " is shipshape again")
 		}
 		return m, tea.Batch(m.scan(), tick())
