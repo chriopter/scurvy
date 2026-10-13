@@ -124,10 +124,15 @@ func (m *Model) render() string {
 			m.listPanel(w, area-rh), m.rightPanel(w, rh))
 	}
 	screen := strings.Join([]string{m.titleLine(w), m.counts(), panels, m.status(w), m.help(w)}, "\n")
-	if !m.confirm {
+	var box string
+	switch {
+	case m.pin != nil:
+		box = m.pinPopup()
+	case m.confirm:
+		box = m.popup(w)
+	default:
 		return screen
 	}
-	box := m.popup(w)
 	x := max(0, (w-lipgloss.Width(box))/2)
 	y := max(0, (h-lipgloss.Height(box))/2)
 	return lipgloss.NewCompositor(lipgloss.NewLayer(screen), lipgloss.NewLayer(box).X(x).Y(y).Z(1)).Render()
@@ -549,27 +554,89 @@ func (m *Model) status(w int) string {
 	return ansi.Truncate(s, w, "…")
 }
 
-// help is the key line: keys bright, words dim, dots between.
+// help is the key line: short words, as on a Mac.
 func (m *Model) help(w int) string {
 	k := lipgloss.NewStyle().Foreground(cDim).Bold(true)
-	self, all := "check scurvy", "show all"
+	filter := "Filter"
+	if !m.all {
+		filter = "Show all"
+	}
+	self := "Upgrade"
 	if m.newer.Tag != "" {
-		self = "update scurvy"
+		self = "Upgrade " + m.newer.Tag
 	}
-	if m.all {
-		all = "hide up to date"
+	var parts []string
+	for _, p := range [][2]string{{"↑↓", "Move"}, {"Space", "Mark"}, {"⏎", "Update"}, {"E", "Pin"},
+		{"R", "Rebuild"}, {"A", filter}, {"r", "Refresh"}, {"U", self}, {"Q", "Quit"}} {
+		parts = append(parts, k.Render(p[0])+" "+sFaint.Render(p[1]))
 	}
-	parts := []string{
-		k.Render("↑/↓") + " " + sFaint.Render("move"),
-		k.Render("space") + " " + sFaint.Render("mark"),
-		k.Render("enter") + " " + sFaint.Render("update"),
-		k.Render("R") + " " + sFaint.Render("rebuild from scratch"),
-		k.Render("a") + " " + sFaint.Render(all),
-		k.Render("r") + " " + sFaint.Render("look again"),
-		k.Render("u") + " " + sFaint.Render(self),
-		k.Render("q") + " " + sFaint.Render("quit"),
+	return ansi.Truncate(" "+strings.Join(parts, "   "), w, "…")
+}
+
+// pinPopup lets one choose the version to pin to, then shows the line
+// that changes and asks.
+func (m *Model) pinPopup() string {
+	p := m.pin
+	cur := registry.Parse(p.it.Image).Tag
+	keys := func(a, b string) string {
+		return lipgloss.NewStyle().Foreground(cActive).Bold(true).Render(a) + sDim.Render(b)
 	}
-	return ansi.Truncate(" "+strings.Join(parts, sFaint.Render(" • ")), w, "…")
+	var lines []string
+	switch {
+	case p.edit != nil:
+		lines = append(lines, sBold.Render("Pin "+p.it.Name()+" from "+cur+" to "+tagIn(p.edit.New)+"?"), "",
+			sDim.Render(fmt.Sprintf("%s, line %d", p.edit.File, p.edit.Line)),
+			sErr.Render("- "+strings.TrimSpace(p.edit.Old)),
+			sOK.Render("+ "+strings.TrimSpace(p.edit.New)), "")
+		if m.dryRun {
+			lines = append(lines, sDue.Render("dry run: shown, not made"))
+		}
+		lines = append(lines, sDim.Render("then pulls and restarts; backed up first, put back if it fails"), "",
+			keys("y", " / enter: pin and update   ")+keys("n", " / esc: back"))
+	case p.loading:
+		lines = append(lines, sBold.Render("Pin "+p.it.Name()+" to …"), "", sDim.Render("asking the registry for versions…"))
+	default:
+		lines = append(lines, sBold.Render("Pin "+p.it.Name()+" to …"), "")
+		from := max(0, min(p.pick-5, len(p.versions)-12))
+		for i := from; i < len(p.versions) && i < from+12; i++ {
+			v := p.versions[i]
+			label, style := v, sText
+			switch {
+			case v == cur:
+				label, style = v+"  current", sDim
+			case less(cur, v):
+				style = lipgloss.NewStyle().Foreground(cUpdate)
+			}
+			if i == p.pick {
+				lines = append(lines, lipgloss.NewStyle().Foreground(cActive).Bold(true).Render("› ")+style.Bold(true).Render(label))
+			} else {
+				lines = append(lines, "  "+style.Render(label))
+			}
+		}
+		if len(p.versions) == 0 && p.err == "" {
+			lines = append(lines, sDim.Render("no versions found"))
+		}
+		if p.err != "" {
+			lines = append(lines, "", sErr.Render(p.err))
+		}
+		lines = append(lines, "", keys("↑↓", " choose   ")+keys("enter", " pin   ")+keys("esc", " cancel"))
+	}
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cActive).
+		Padding(1, 3).Background(lipgloss.Color("235")).Render(strings.Join(lines, "\n"))
+}
+
+// less compares two versions of the same shape.
+func less(a, b string) bool {
+	x, y := strings.Split(strings.TrimPrefix(a, "v"), "."), strings.Split(strings.TrimPrefix(b, "v"), ".")
+	for i := 0; i < len(x) && i < len(y); i++ {
+		var p, q int
+		fmt.Sscan(x[i], &p)
+		fmt.Sscan(y[i], &q)
+		if p != q {
+			return p < q
+		}
+	}
+	return false
 }
 
 // popup asks, in a box over the screen, whether to update, and lists what.
@@ -606,17 +673,6 @@ func (m *Model) popup(w int) string {
 		Padding(1, 3).Background(lipgloss.Color("235")).Render(strings.Join(lines, "\n"))
 }
 
-func (m *Model) confirmText() string {
-	todo, what := m.todo()
-	s := fmt.Sprintf("Update %s?", what)
-	if len(todo) > 1 && len(m.marked) == 0 {
-		s = fmt.Sprintf("Update %s of %s?", plural(len(todo), "container"), what)
-	}
-	if m.dryRun {
-		s += " (dry run: only shown)"
-	}
-	return s
-}
 
 func plural(n int, word string) string {
 	if n == 1 {
