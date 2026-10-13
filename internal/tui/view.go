@@ -24,8 +24,8 @@ var (
 	cDim     = lipgloss.Color("245")
 	cFaint   = lipgloss.Color("240")
 	cPickBg  = lipgloss.Color("237")
-	cCurrent = lipgloss.Color("245") // up to date: nothing to see
-	cUpdate  = lipgloss.Color("252") // update available: plain text
+	cCurrent = lipgloss.Color("108") // green
+	cUpdate  = lipgloss.Color("74")  // blue
 	cOverdue = lipgloss.Color("179") // muted yellow
 	cEOL     = lipgloss.Color("167") // muted red
 	cUnk     = lipgloss.Color("242")
@@ -235,7 +235,7 @@ func (m *Model) listPanel(w, h int) string {
 		}
 	}
 	if hidden > 0 {
-		lines = append(lines, "", sFaint.Render(fmt.Sprintf("%d up to date · a shows them", hidden)))
+		lines = append(lines, "", sFaint.Render(fmt.Sprintf("%d up to date hidden · a shows them", hidden)))
 	}
 	// Scroll by lines, keeping the pick in view.
 	if pickAt < m.top {
@@ -546,7 +546,7 @@ func (m *Model) help(w int) string {
 		self = "update scurvy"
 	}
 	if m.all {
-		all = "hide current"
+		all = "hide up to date"
 	}
 	parts := []string{
 		k.Render("↑/↓") + " " + sFaint.Render("move"),
@@ -582,6 +582,6 @@ func plural(n int, word string) string {
 // look in a terminal of w×h with row pick chosen. It serves the README's
 // picture (tools/shot).
 func Snapshot(host string, items []scan.Item, w, h, pick int) string {
-	m := &Model{host: host, items: items, width: w, height: h, pick: pick, done: new(atomic.Int64)}
+	m := &Model{host: host, items: items, width: w, height: h, pick: pick, all: true, done: new(atomic.Int64)}
 	return m.render()
 }
