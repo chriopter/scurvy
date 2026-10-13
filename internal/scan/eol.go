@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,19 @@ var (
 	leading     = regexp.MustCompile(`^v?(\d+)(?:\.(\d+))?`)
 )
 
+// majorOnly says whether endoflife.date counts a product's lines by major
+// version alone: node 20, debian 12, postgres 16 (but postgres 9.6).
+func majorOnly(name, major string) bool {
+	switch name {
+	case "node", "debian":
+		return true
+	case "postgres":
+		n, _ := strconv.Atoi(major)
+		return n >= 10
+	}
+	return false
+}
+
 // release names a product line an image is built on: python 3.12,
 // debian bookworm, alpine 3.19.
 type release struct {
@@ -56,7 +70,7 @@ func releasesOf(r registry.Ref) []release {
 		if product, ok := eolProducts[name]; ok {
 			if m := leading.FindStringSubmatch(tag); m != nil {
 				cycle := m[1]
-				if m[2] != "" && name != "postgres" && name != "debian" && name != "mariadb" {
+				if m[2] != "" && !majorOnly(name, m[1]) {
 					cycle += "." + m[2]
 				}
 				out = append(out, release{product, cycle, name + " " + cycle})
@@ -95,19 +109,32 @@ type cycle struct {
 type eolDates struct {
 	http *http.Client
 	mu   sync.Mutex
-	data map[string][]cycle
+	data map[string]*eolAnswer
+}
+
+type eolAnswer struct {
+	once   sync.Once
+	cycles []cycle
+	err    error
 }
 
 func newEOLDates() *eolDates {
-	return &eolDates{http: &http.Client{Timeout: 15 * time.Second}, data: map[string][]cycle{}}
+	return &eolDates{http: &http.Client{Timeout: 15 * time.Second}, data: map[string]*eolAnswer{}}
 }
 
 func (e *eolDates) cycles(ctx context.Context, product string) ([]cycle, error) {
 	e.mu.Lock()
-	defer e.mu.Unlock() // one product at a time; the answers are small
-	if c, ok := e.data[product]; ok {
-		return c, nil
+	a := e.data[product]
+	if a == nil {
+		a = &eolAnswer{}
+		e.data[product] = a
 	}
+	e.mu.Unlock()
+	a.once.Do(func() { a.cycles, a.err = e.fetch(ctx, product) })
+	return a.cycles, a.err
+}
+
+func (e *eolDates) fetch(ctx context.Context, product string) ([]cycle, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://endoflife.date/api/"+product+".json", nil)
 	if err != nil {
 		return nil, err
@@ -121,18 +148,16 @@ func (e *eolDates) cycles(ctx context.Context, product string) ([]cycle, error) 
 		return nil, fmt.Errorf("endoflife.date: %s", resp.Status)
 	}
 	var c []cycle
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&c); err != nil {
-		return nil, err
-	}
-	e.data[product] = c
-	return c, nil
+	err = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&c)
+	return c, err
 }
 
-// End is when a release stops getting fixes; zero when unknown or not set.
-func (e *eolDates) End(ctx context.Context, rel release) time.Time {
+// End is when a release stops getting fixes; zero when not set or the
+// release is not listed.
+func (e *eolDates) End(ctx context.Context, rel release) (time.Time, error) {
 	cs, err := e.cycles(ctx, rel.product)
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, err
 	}
 	for _, c := range cs {
 		if c.Cycle != rel.cycle && !strings.EqualFold(firstWord(c.Codename), rel.cycle) {
@@ -142,16 +167,16 @@ func (e *eolDates) End(ctx context.Context, rel release) time.Time {
 		case string:
 			t, err := time.Parse("2006-01-02", v)
 			if err == nil {
-				return t
+				return t, nil
 			}
 		case bool:
 			if v {
-				return time.Unix(0, 0) // over, date unknown
+				return time.Unix(0, 0), nil // over, date unknown
 			}
 		}
-		return time.Time{}
+		return time.Time{}, nil
 	}
-	return time.Time{}
+	return time.Time{}, nil
 }
 
 // firstWord: Ubuntu's codenames are "Noble Numbat"; tags say "noble".

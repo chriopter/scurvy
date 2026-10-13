@@ -11,17 +11,16 @@ import (
 	"github.com/chriopter/scurvy/internal/registry"
 )
 
-func TestNewerTags(t *testing.T) {
+func TestNewerTag(t *testing.T) {
 	tags := []string{"10.11.11", "10.11.12", "10.12.0", "11.0.0", "10.12.0-rc1", "latest", "2025111705", "v10.13.0", "10.11"}
-	minor, major := newerTags(tags, "10.11.11")
-	if minor != "10.12.0" || major != "11.0.0" {
-		t.Errorf("got %q %q", minor, major)
+	if got := newerTag(tags, "10.11.11"); got != "10.12.0" {
+		t.Errorf("got %q", got)
 	}
-	if m, _ := newerTags(tags, "10.12.0"); m != "" {
-		t.Errorf("nothing newer in 10.x, got %q", m)
+	if got := newerTag(tags, "10.12.0"); got != "" {
+		t.Errorf("nothing newer in 10.x, got %q", got)
 	}
-	if m, _ := newerTags([]string{"3.19", "3.24", "3.9", "3.24.1"}, "3.19"); m != "3.24" {
-		t.Errorf("alpine: got %q", m)
+	if got := newerTag([]string{"3.19", "3.24", "3.9", "3.24.1"}, "3.19"); got != "3.24" {
+		t.Errorf("alpine: got %q", got)
 	}
 }
 
@@ -34,24 +33,41 @@ func TestPinned(t *testing.T) {
 			t.Errorf("pinned(%q) != %v", tag, want)
 		}
 	}
+	if majorOf("10.11.11") != "10." || majorOf("v2.3") != "v2." {
+		t.Error("majorOf")
+	}
 }
 
-func TestFinalBase(t *testing.T) {
-	dir := t.TempDir()
-	write := func(s string) string {
-		p := filepath.Join(dir, "Dockerfile")
-		os.WriteFile(p, []byte(s), 0o644)
-		return p
+func write(t *testing.T, name, text string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	b, ok := finalBase(write("FROM rust:latest AS tunnel\nRUN cargo build \\\n  --release\nFROM python:3.12-slim\nCOPY --from=tunnel /x /x\n"))
-	if !ok || b.ref != "python:3.12-slim" {
+	return p
+}
+
+func TestBaseOf(t *testing.T) {
+	p := write(t, "Dockerfile", "FROM rust:latest AS tunnel\nRUN cargo build \\\n  --release\nFROM python:3.12-slim\nCOPY --from=tunnel /x /x\n")
+	if b, ok := baseOf(p, nil, ""); !ok || b.ref != "python:3.12-slim" {
 		t.Errorf("multi-stage: %+v", b)
 	}
-	b, _ = finalBase(write("ARG PY=3.13\nFROM --platform=linux/amd64 python:${PY}-alpine AS base\nFROM base AS final\n"))
-	if b.ref != "python:3.13-alpine" || b.raw != "python:${PY}-alpine" {
-		t.Errorf("args and stages: %+v", b)
+	p = write(t, "Dockerfile", "ARG PY=3.13\nFROM --platform=linux/amd64 python:${PY}-alpine AS base\nARG PY=9.9\nFROM base AS final\n")
+	if b, _ := baseOf(p, nil, ""); b.ref != "python:3.13-alpine" || b.raw != "python:${PY}-alpine" {
+		t.Errorf("args and stages (a stage's ARG is not FROM's): %+v", b)
 	}
-	if _, ok := finalBase(write("FROM golang AS b\nFROM scratch\n")); ok {
+	v := "3.14"
+	if b, _ := baseOf(p, map[string]*string{"PY": &v}, ""); b.ref != "python:3.14-alpine" {
+		t.Errorf("compose build args win: %+v", b)
+	}
+	p = write(t, "Dockerfile", "FROM node:22 AS dev\nFROM nginx:1.27 AS prod\n")
+	if b, _ := baseOf(p, nil, "dev"); b.ref != "node:22" {
+		t.Errorf("target: %+v", b)
+	}
+	if _, ok := baseOf(p, nil, "missing"); ok {
+		t.Error("a missing target has no base")
+	}
+	if _, ok := baseOf(write(t, "Dockerfile", "FROM golang AS b\nFROM scratch\n"), nil, ""); ok {
 		t.Error("scratch has no base")
 	}
 }
@@ -70,51 +86,42 @@ func TestReleasesOf(t *testing.T) {
 		"debian:bookworm-slim":      {"debian bookworm"},
 		"valkey/valkey:8-bookworm":  {"debian bookworm"},
 		"postgres:16.4-alpine3.20":  {"postgresql 16", "alpine-linux 3.20"},
-		"node:22-alpine":            {"nodejs 22"},
+		"postgres:9.6":              {"postgresql 9.6"},
+		"node:20.20.2":              {"nodejs 20"},
+		"mariadb:10.6.28":           {"mariadb 10.6"},
 		"ghcr.io/x/postgres:14-abc": nil,
 		"quay.io/acme/api":          nil,
 	} {
-		got := labels(ref)
-		if len(got) != len(want) {
+		if got := strings.Join(labels(ref), ","); got != strings.Join(want, ",") {
 			t.Errorf("%s: got %v want %v", ref, got, want)
-			continue
-		}
-		for i := range got {
-			if got[i] != want[i] {
-				t.Errorf("%s: got %v want %v", ref, got, want)
-			}
 		}
 	}
 }
 
-func TestBump(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "docker-compose.yml")
-	os.WriteFile(p, []byte("services:\n  a:\n    image: acme/app:10.11.11\n  b:\n    image: acme/app:10.11.111\n  c:\n    image: docker.io/acme/app:10.11.11 # pinned\n"), 0o640)
-	b := findBump([]string{p}, "acme/app:10.11.11", "acme/app:10.11.12")
-	if b == nil {
-		t.Fatal("not found")
+func TestImageEdit(t *testing.T) {
+	p := write(t, "compose.yaml", "services:\n  a:\n    image: acme/app:1.2.11 # pinned\n  b:\n    image: \"ghcr.io/acme/app:1.2.11\"\n  c:\n    image: acme/app:1.2.111\n")
+	e, err := imageEdit([]string{p}, "acme/app:1.2.11", "acme/app:1.2.12")
+	if err != nil || e.Line != 3 || e.New != "    image: acme/app:1.2.12 # pinned" {
+		t.Fatalf("got %+v, %v", e, err)
 	}
-	before, after, err := b.Apply()
-	if err != nil || len(before) != 2 || len(after) != 2 {
-		t.Fatalf("apply: %v %v %v", before, after, err)
+	q := write(t, "compose.yaml", "services:\n  a:\n    image: acme/app:1.0\n  b:\n    image: acme/app:1.0\n")
+	if _, err := imageEdit([]string{q}, "acme/app:1.0", "acme/app:1.1"); err == nil {
+		t.Error("two services on one image: which one is not certain")
 	}
-	data, _ := os.ReadFile(p)
-	want := "services:\n  a:\n    image: acme/app:10.11.12\n  b:\n    image: acme/app:10.11.111\n  c:\n    image: docker.io/acme/app:10.11.12 # pinned\n"
-	if string(data) != want {
-		t.Errorf("got\n%s", data)
+	if _, err := imageEdit([]string{p}, "acme/app:9", "x"); err == nil {
+		t.Error("no line, no edit")
 	}
-	if info, _ := os.Stat(p); info.Mode().Perm() != 0o640 {
-		t.Errorf("mode changed to %v", info.Mode())
+}
+
+func TestFromEdits(t *testing.T) {
+	p := write(t, "Dockerfile", "FROM caddy:2.11.4-builder AS builder\n# FROM caddy:2.11.4\nFROM caddy:2.11.4\n")
+	all := func(string) bool { return true }
+	edits, err := fromEdits(p, "caddy:2.11.4", "caddy:2.11.7", all)
+	if err != nil || len(edits) != 2 || edits[0].New != "FROM caddy:2.11.7-builder AS builder" || edits[1].Line != 3 {
+		t.Fatalf("got %+v, %v", edits, err)
 	}
-	if err := b.Undo(); err != nil {
-		t.Fatal(err)
-	}
-	data, _ = os.ReadFile(p)
-	if string(data) == want {
-		t.Error("undo did nothing")
-	}
-	if findBump([]string{p}, "acme/app:10.11.1", "x") != nil {
-		t.Error("10.11.1 is not in 10.11.11")
+	if _, err := fromEdits(p, "caddy:2.11.4", "caddy:2.11.7", func(string) bool { return false }); err == nil {
+		t.Error("a variant without its new tag moves nothing")
 	}
 }
 
@@ -123,43 +130,15 @@ func TestDue(t *testing.T) {
 	if it.due(time.Hour) != 7*24*time.Hour {
 		t.Error("7d")
 	}
-	it.Container.Labels[LabelDueAfter] = "2w"
-	if it.due(time.Hour) != 14*24*time.Hour {
-		t.Error("2w")
-	}
 	it.Container.Labels[LabelDueAfter] = "soon"
 	if it.due(time.Hour) != time.Hour {
 		t.Error("nonsense keeps the default")
 	}
 }
 
-func TestDays(t *testing.T) {
-	if Days(time.Hour) != "today" || Days(30*time.Hour) != "1 day" || Days(50*24*time.Hour) != "50 days" {
-		t.Error("days")
-	}
-}
-
-func TestBumpVariants(t *testing.T) {
-	dir := t.TempDir()
-	df := filepath.Join(dir, "Dockerfile")
-	os.WriteFile(df, []byte("FROM caddy:2.11.4-builder AS builder\nRUN xcaddy build\nFROM caddy:2.11.4\nCOPY --from=builder /x /x\n"), 0o644)
-	cf := filepath.Join(dir, "docker-compose.yml")
-	os.WriteFile(cf, []byte("services:\n  caddy:\n    build: .\n    image: caddy-custom:2.11.4\n"), 0o644)
-	b := findBump([]string{df}, "caddy:2.11.4", "caddy:2.11.7")
-	b.Then = findBump([]string{cf}, "caddy-custom:2.11.4", "caddy-custom:2.11.7")
-	if _, err := b.All(true); err != nil {
-		t.Fatal(err)
-	}
-	d, _ := os.ReadFile(df)
-	c, _ := os.ReadFile(cf)
-	if string(d) != "FROM caddy:2.11.7-builder AS builder\nRUN xcaddy build\nFROM caddy:2.11.7\nCOPY --from=builder /x /x\n" {
-		t.Errorf("Dockerfile:\n%s", d)
-	}
-	if !strings.Contains(string(c), "image: caddy-custom:2.11.7") {
-		t.Errorf("compose:\n%s", c)
-	}
-	b.UndoAll()
-	if d, _ := os.ReadFile(df); !strings.Contains(string(d), "caddy:2.11.4-builder") {
-		t.Errorf("undo:\n%s", d)
+func TestUpdatable(t *testing.T) {
+	it := Item{Kind: Pulled, Project: docker.Project{Name: "p"}, Image: "alpine:3.20@sha256:abc"}
+	if it.Updatable() {
+		t.Error("a digest pins it, tag or not")
 	}
 }

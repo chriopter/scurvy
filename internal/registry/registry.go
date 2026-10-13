@@ -1,6 +1,7 @@
 // Package registry asks image registries what a tag points to now, without
 // pulling anything: the digest behind a tag, when an image was built, and
-// which tags exist. Public images only; tokens are fetched anonymously.
+// which tags exist. It logs in with what `docker login` stored in
+// config.json, else anonymously; credential helpers are not used.
 package registry
 
 import (
@@ -71,16 +72,10 @@ func (r Ref) Official() (string, bool) {
 	return strings.CutPrefix(r.Repo, "library/")
 }
 
-func (r Ref) String() string {
-	s := r.Name
-	if r.Tag != "" {
-		s += ":" + r.Tag
-	}
-	if r.Digest != "" {
-		s += "@" + r.Digest
-	}
-	return s
-}
+// maxPages bounds a tag listing; a longer one is reported, not cut short.
+const maxPages = 30
+
+var errTooManyTags = errors.New("too many tags to compare")
 
 var manifestTypes = strings.Join([]string{
 	"application/vnd.oci.image.index.v1+json",
@@ -95,7 +90,7 @@ type Client struct {
 	http *http.Client
 
 	mu      sync.Mutex
-	tokens  map[string]string // host/repo → bearer token
+	tokens  map[string]string // host/repo → Authorization header
 	answers map[string]*answer
 }
 
@@ -107,7 +102,19 @@ type answer struct {
 
 func New() *Client {
 	return &Client{
-		http:    &http.Client{Timeout: 20 * time.Second},
+		http: &http.Client{
+			Timeout: 20 * time.Second,
+			// Never follow a redirect from https to plain http.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return errors.New("too many redirects")
+				}
+				if req.URL.Scheme != "https" {
+					return fmt.Errorf("refusing a redirect to %s", req.URL.Scheme)
+				}
+				return nil
+			},
+		},
 		tokens:  map[string]string{},
 		answers: map[string]*answer{},
 	}
@@ -133,16 +140,14 @@ func (c *Client) Digest(ctx context.Context, r Ref) (string, error) {
 		return t.Digest, nil
 	}
 	v, err := c.remember("digest "+r.Host+"/"+r.Repo+":"+r.Tag, func() (any, error) {
-		resp, err := c.do(ctx, http.MethodHead, r, "/manifests/"+r.Tag, manifestTypes)
-		if err != nil {
-			return "", err
+		if resp, err := c.do(ctx, http.MethodHead, r, "/manifests/"+r.Tag, manifestTypes); err == nil {
+			resp.Body.Close()
+			if d := resp.Header.Get("Docker-Content-Digest"); d != "" {
+				return d, nil
+			}
 		}
-		resp.Body.Close()
-		if d := resp.Header.Get("Docker-Content-Digest"); d != "" {
-			return d, nil
-		}
-		// Some registries leave the header out of HEAD answers.
-		resp, err = c.do(ctx, http.MethodGet, r, "/manifests/"+r.Tag, manifestTypes)
+		// Some registries refuse HEAD or leave the header out of it.
+		resp, err := c.do(ctx, http.MethodGet, r, "/manifests/"+r.Tag, manifestTypes)
 		if err != nil {
 			return "", err
 		}
@@ -231,7 +236,10 @@ func (c *Client) Tags(ctx context.Context, r Ref, like string) ([]string, error)
 	v, err := c.remember("tags "+r.Host+"/"+r.Repo, func() (any, error) {
 		var all []string
 		path := "/tags/list?n=1000"
-		for page := 0; path != "" && page < 50; page++ {
+		for page := 0; path != ""; page++ {
+			if page == maxPages {
+				return nil, errTooManyTags
+			}
 			resp, err := c.do(ctx, http.MethodGet, r, path, "")
 			if err != nil {
 				return nil, err
@@ -298,10 +306,10 @@ func (c *Client) do(ctx context.Context, method string, r Ref, path, accept stri
 			req.Header.Set("Accept", accept)
 		}
 		c.mu.Lock()
-		token := c.tokens[key]
+		auth := c.tokens[key]
 		c.mu.Unlock()
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
 		}
 		resp, err := c.http.Do(req)
 		if err != nil {
@@ -310,12 +318,12 @@ func (c *Client) do(ctx context.Context, method string, r Ref, path, accept stri
 		if resp.StatusCode == http.StatusUnauthorized && try == 0 {
 			challenge := resp.Header.Get("WWW-Authenticate")
 			resp.Body.Close()
-			token, err := c.token(ctx, r.Host, challenge, r.Repo)
+			auth, err := c.authorize(ctx, r.Host, challenge, r.Repo)
 			if err != nil {
-				return nil, fmt.Errorf("%s: %w", r.Host, err)
+				return nil, fmt.Errorf("%s: %w", loginHost(r.Host), err)
 			}
 			c.mu.Lock()
-			c.tokens[key] = token
+			c.tokens[key] = auth
 			c.mu.Unlock()
 			continue
 		}
@@ -333,33 +341,47 @@ func (c *Client) do(ctx context.Context, method string, r Ref, path, accept stri
 
 var challengeParam = regexp.MustCompile(`(\w+)="([^"]*)"`)
 
-// token answers a "Bearer realm=…,service=…,scope=…" challenge anonymously.
-func (c *Client) token(ctx context.Context, host, challenge, repo string) (string, error) {
+// authorize answers a registry's challenge with an Authorization header:
+// Basic with the docker login, or a Bearer token fetched from the realm
+// it names (over https only), with the login if there is one.
+func (c *Client) authorize(ctx context.Context, host, challenge, repo string) (string, error) {
+	user, pass, login := credentials(host)
+	if _, ok := cutPrefixFold(challenge, "Basic"); ok {
+		if !login {
+			return "", fmt.Errorf("private image: run docker login %s", loginHost(host))
+		}
+		return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass)), nil
+	}
 	rest, ok := cutPrefixFold(challenge, "Bearer ")
 	if !ok {
-		return "", errors.New("needs a login")
+		return "", errors.New("unknown login challenge")
 	}
-	q := url.Values{}
-	realm := ""
+	params := map[string]string{}
 	for _, m := range challengeParam.FindAllStringSubmatch(rest, -1) {
-		if m[1] == "realm" {
-			realm = m[2]
-		} else {
-			q.Set(m[1], m[2])
-		}
+		params[m[1]] = m[2]
 	}
-	if realm == "" {
+	realm, err := url.Parse(params["realm"])
+	if err != nil || realm.Host == "" {
 		return "", errors.New("token challenge without realm")
+	}
+	if realm.Scheme != "https" {
+		return "", fmt.Errorf("refusing a token realm over %s", realm.Scheme)
+	}
+	q := realm.Query()
+	for k, v := range params {
+		if k != "realm" {
+			q.Set(k, v)
+		}
 	}
 	if q.Get("scope") == "" {
 		q.Set("scope", "repository:"+repo+":pull")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, realm+"?"+q.Encode(), nil)
+	realm.RawQuery = q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, realm.String(), nil)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("User-Agent", "scurvy")
-	user, pass, login := credentials(host)
 	if login {
 		req.SetBasicAuth(user, pass)
 	}
@@ -390,7 +412,7 @@ func (c *Client) token(ctx context.Context, host, challenge, repo string) (strin
 	if t.Token == "" {
 		return "", errors.New("token: empty")
 	}
-	return t.Token, nil
+	return "Bearer " + t.Token, nil
 }
 
 func cutPrefixFold(s, prefix string) (string, bool) {
@@ -505,7 +527,10 @@ func (c *Client) hubTags(ctx context.Context, r Ref, like string) ([]string, err
 			next += "&name=" + url.QueryEscape(like)
 		}
 		var all []string
-		for page := 0; next != "" && page < 20; page++ {
+		for page := 0; next != ""; page++ {
+			if page == maxPages {
+				return nil, errTooManyTags
+			}
 			var list struct {
 				Next    string `json:"next"`
 				Results []struct {
