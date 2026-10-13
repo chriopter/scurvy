@@ -1,0 +1,90 @@
+name: release
+
+# A pushed tag (git tag -s v0.2.0 && git push origin v0.2.0) publishes that
+# version: tested, built for amd64 and arm64, signed and attested.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write      # build attestation (Sigstore)
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Actions are pinned to commits: this job holds the signing key.
+    # Dependabot proposes updates.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # tags and history for the release notes
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          for arch in amd64 arm64; do
+            mkdir -p "dist/$arch"
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X main.version=$TAG" -o "dist/$arch/scurvy" .
+            cp LICENSE README.md "dist/$arch/"
+            tar -C "dist/$arch" -czf "scurvy-linux-$arch.tar.gz" scurvy LICENSE README.md
+          done
+          cp bin/install install.sh
+
+      # scurvy's updater installs only releases whose SHA256SUMS carries a
+      # valid signature from this key; the public half is in the program
+      # and in install.sh. The signed list names its version, so an older
+      # signed release can never pass as a newer one.
+      - name: Sign
+        env:
+          TAG: ${{ github.ref_name }}
+          SCURVY_SIGNING_KEY: ${{ secrets.SCURVY_SIGNING_KEY }}
+        run: |
+          { echo "version $TAG"; sha256sum scurvy-linux-amd64.tar.gz scurvy-linux-arm64.tar.gz install.sh; } > SHA256SUMS
+          go run ./tools/sign SHA256SUMS > SHA256SUMS.sig
+
+      # Provenance anyone can check: gh attestation verify <file> -R chriopter/scurvy
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            scurvy-linux-amd64.tar.gz
+            scurvy-linux-arm64.tar.gz
+            install.sh
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Commits go straight to main, so list their titles; GitHub's
+          # generated notes only summarize pull requests.
+          prev=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          if [[ -n $prev ]] && git rev-parse -q --verify "$prev^{commit}" >/dev/null; then
+            changes=$(git log --no-merges --format='- %s' "$prev..$GITHUB_SHA")
+          else
+            changes=$(git log --no-merges --format='- %s' "$GITHUB_SHA")
+          fi
+          {
+            echo "## Changes"
+            echo
+            echo "$changes"
+            echo
+            echo "**Update:** press u in scurvy when it shows a newer version, or run \`scurvy update\`."
+          } > notes.md
+          # A tag with a hyphen (v0.2.0-rc1) is a pre-release: never
+          # "latest", so neither the installer nor the updater offers it.
+          pre=()
+          [[ $TAG == *-* ]] && pre=(--prerelease)
+          gh release create "$TAG" scurvy-linux-amd64.tar.gz scurvy-linux-arm64.tar.gz install.sh SHA256SUMS SHA256SUMS.sig \
+            --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md "${pre[@]}"
