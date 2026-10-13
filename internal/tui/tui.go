@@ -260,7 +260,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) key(k string) tea.Cmd {
 	rows := m.rows()
-	yes := k == "y" || k == "enter"
+	yes := k == "y" || k == "Y" || k == "enter"
 	switch {
 	case m.askSelf:
 		m.askSelf = false
