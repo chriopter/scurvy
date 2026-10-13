@@ -10,7 +10,45 @@ import (
 // Apply writes the new version into the file, in every place that names
 // the old one as a whole reference. It returns the changed lines, as
 // before and after, for showing.
-func (b Bump) Apply() (before, after []string, err error) {
+func (b Bump) Apply() (before, after []string, err error) { return b.apply(true) }
+
+// Preview says what Apply would change, and changes nothing.
+func (b Bump) Preview() (before, after []string, err error) { return b.apply(false) }
+
+// Change is one file a bump changes, with its lines before and after.
+type Change struct {
+	File          string
+	Before, After []string
+}
+
+// All applies the bump and the ones it brings along (Then), or with
+// write false only says what they would change. A failure undoes what
+// was written.
+func (b *Bump) All(write bool) ([]Change, error) {
+	var done []Change
+	for x := b; x != nil; x = x.Then {
+		before, after, err := x.apply(write)
+		if err != nil {
+			if write {
+				for y := b; y != x; y = y.Then {
+					_ = y.Undo()
+				}
+			}
+			return nil, err
+		}
+		done = append(done, Change{x.File, before, after})
+	}
+	return done, nil
+}
+
+// UndoAll puts back what All wrote.
+func (b *Bump) UndoAll() {
+	for x := b; x != nil; x = x.Then {
+		_ = x.Undo()
+	}
+}
+
+func (b Bump) apply(write bool) (before, after []string, err error) {
 	info, err := os.Stat(b.File)
 	if err != nil {
 		return nil, nil, err
@@ -31,6 +69,9 @@ func (b Bump) Apply() (before, after []string, err error) {
 	}
 	if len(before) == 0 {
 		return nil, nil, fmt.Errorf("%s no longer names %s", b.File, b.Old)
+	}
+	if !write {
+		return before, after, nil
 	}
 	tmp := b.File + ".scurvy"
 	if err := os.WriteFile(tmp, []byte(strings.Join(lines, "")), info.Mode().Perm()); err != nil {
@@ -57,10 +98,8 @@ func replaceRef(line, old, new string) string {
 			return out.String()
 		}
 		end := i + len(old)
-		whole := (end == len(line) || !isRefChar(line[end])) &&
-			(i == 0 || !isRefChar(line[i-1]) || line[i-1] == '/')
 		out.WriteString(line[:i])
-		if whole {
+		if whole(line, i, end) {
 			out.WriteString(new)
 		} else {
 			out.WriteString(old)

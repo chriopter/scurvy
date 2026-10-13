@@ -88,6 +88,7 @@ type Finding struct {
 // Bump raises a pinned version in a file: Old becomes New.
 type Bump struct {
 	File, Old, New string
+	Then           *Bump // another place that moves along, if any
 }
 
 // Name is how people call the container: its service, else its name.
@@ -269,11 +270,11 @@ func (s *Scanner) pulled(ctx context.Context, it *Item) {
 	case !running.HasDigest(digest):
 		created, _ := s.reg.Created(ctx, ref, digest)
 		it.Latest = ref.Tag + "@" + short(digest)
-		it.add(s.level(created, due), created, "new image", "new image for %s, %s", ref.Tag, s.ago(created, "built"))
+		it.add(s.level(created, due), created, "new image", "new image for %s, %s", ref.Tag, s.ago(created, "published"))
 	}
 
 	if pinned(ref.Tag) {
-		if tags, err := s.reg.Tags(ctx, ref); err == nil {
+		if tags, err := s.reg.Tags(ctx, ref, majorOf(ref.Tag)); err == nil {
 			minor, major := newerTags(tags, ref.Tag)
 			if minor != "" {
 				created, _ := s.reg.Created(ctx, ref, minor)
@@ -335,7 +336,7 @@ func (s *Scanner) built(ctx context.Context, it *Item, svc docker.Service) {
 	}
 	ref := registry.Parse(b.ref)
 	if pinned(ref.Tag) {
-		if tags, err := s.reg.Tags(ctx, ref); err == nil {
+		if tags, err := s.reg.Tags(ctx, ref, majorOf(ref.Tag)); err == nil {
 			minor, major := newerTags(tags, ref.Tag)
 			if minor != "" {
 				created, _ := s.reg.Created(ctx, ref, minor)
@@ -346,6 +347,11 @@ func (s *Scanner) built(ctx context.Context, it *Item, svc docker.Service) {
 					it.add(OK, time.Time{}, "", "the Dockerfile belongs to the clone's upstream; raise it there")
 				case !strings.Contains(b.raw, "$"):
 					it.Bump = findBump([]string{file}, ref.Name+":"+ref.Tag, ref.Name+":"+minor)
+					// An image named after the base's version moves with it:
+					// image: caddy-custom:2.11.4 becomes caddy-custom:2.11.7.
+					if own := registry.Parse(it.Image); it.Bump != nil && own.Tag == ref.Tag {
+						it.Bump.Then = findBump(it.Project.Files, own.Name+":"+own.Tag, own.Name+":"+minor)
+					}
 				}
 			}
 			if major != "" {
@@ -357,7 +363,7 @@ func (s *Scanner) built(ctx context.Context, it *Item, svc docker.Service) {
 			it.Err = err.Error()
 		} else if created, err := s.reg.Created(ctx, ref, digest); err == nil &&
 			!built.IsZero() && created.After(built) {
-			it.add(s.level(created, due), created, "new base image", "base %s has a newer image, %s", b.ref, s.ago(created, "built"))
+			it.add(s.level(created, due), created, "new base image", "base %s has a newer image, %s", b.ref, s.ago(created, "published"))
 		}
 	}
 	s.endOfLife(ctx, it, ref)
@@ -508,14 +514,24 @@ func containsRef(text, ref string) bool {
 			return false
 		}
 		end := i + j + len(ref)
-		if end == len(text) || !isRefChar(text[end]) {
-			if start := i + j; start == 0 || !isRefChar(text[start-1]) || text[start-1] == '/' {
-				return true
-			}
+		if whole(text, i+j, end) {
+			return true
 		}
 		i = end
 	}
 }
+
+// whole reports whether text[start:end] stands as a reference of its own.
+// A variant counts too: caddy:2.11.4 is in caddy:2.11.4-builder, so the
+// stages of one Dockerfile move together.
+func whole(text string, start, end int) bool {
+	before := start == 0 || !isRefChar(text[start-1]) || text[start-1] == '/'
+	after := end == len(text) || !isRefChar(text[end]) ||
+		text[end] == '-' && end+1 < len(text) && isLetter(text[end+1])
+	return before && after
+}
+
+func isLetter(c byte) bool { return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' }
 
 func isRefChar(c byte) bool {
 	return c == '.' || c == '-' || c == '_' || c == '/' || c == ':' || c == '@' ||
