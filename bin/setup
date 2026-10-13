@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Build scurvy from this checkout and install it to /usr/local/bin.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+go build -trimpath -o scurvy .
+sudo install -m 755 scurvy /usr/local/bin/scurvy
+rm scurvy
+echo "installed $(scurvy version) to /usr/local/bin/scurvy"
