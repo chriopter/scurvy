@@ -34,7 +34,7 @@ Containers of one compose stack stand together. The right panel tells everything
 | type | image comes from | Enter |
 |---|---|---|
 | image | a registry, moving tag (`:latest`) | pulls, restarts |
-| pinned 16.4 | a registry, fixed version (`:16.4`) | writes `16.6` into the compose file, pulls, restarts |
+| pinned 16.4 | a registry, fixed version (`:16.4`) | pulls 16.4 again if it was rebuilt; a newer version is shown, <kbd>e</kbd> pins to it |
 | build | a local Dockerfile | raises a fixed `FROM`, rebuilds, restarts |
 | build | a local Dockerfile in a git clone | `git pull`, rebuilds, restarts |
 | pinned digest | a registry, fixed digest (`@sha256:…`) | nothing |

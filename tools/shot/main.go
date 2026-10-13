@@ -38,9 +38,8 @@ func item(project, service, image string, kind scan.Kind, current string, level 
 }
 
 func items() []scan.Item {
-	db := item("paperless", "db", "postgres:16.4", scan.Pulled, "16.4", scan.Update,
-		"new version", "16.4 → 16.6, released 9 days ago", ago(9))
-	db.Edits = []scan.Edit{{File: "/srv/paperless/compose.yaml", Line: 9, Old: "    image: postgres:16.4", New: "    image: postgres:16.6"}}
+	db := item("paperless", "db", "postgres:16.4", scan.Pulled, "16.4", scan.OK, "", "", time.Time{})
+	db.Newest = "16.6"
 
 	proxy := item("proxy", "proxy", "proxy-proxy", scan.Built, "built 12 days ago", scan.Update,
 		"new base version", "base traefik:v3.1.2 → v3.1.6, released 6 days ago", ago(6))

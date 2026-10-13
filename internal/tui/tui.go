@@ -388,10 +388,6 @@ func (m *Model) key(k string) tea.Cmd {
 		}
 	case "enter", "R":
 		todo, _ := m.todo()
-		// A new major is a decision: Enter on it opens the version choice.
-		if len(todo) == 1 && len(m.marked) == 0 && todo[0].Major != "" && len(todo[0].Edits) == 0 && k == "enter" {
-			return m.key("e")
-		}
 		switch {
 		case m.scanning:
 		case m.updating, m.installing:

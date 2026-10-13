@@ -5,6 +5,7 @@
 package scan
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"os"
@@ -204,26 +205,17 @@ func (s *scanner) pulled(ctx context.Context, it *Item) {
 	if err != nil {
 		it.fail("versions", err)
 	}
+	// A pinned version is a choice: newer ones are news, not updates. e
+	// pins another.
 	newer, major := newerTag(append(tags, recent...), target.Tag)
-	if major != "" {
-		released, _ := s.reg.Created(ctx, target, major)
-		it.Major = major
-		it.add(Update, released, "new major "+major, "a new major version %s is out, %s; e pins to it", major, s.ago(released, "released"))
+	for _, v := range []string{major, newer} {
+		if v == "" {
+			continue
+		}
+		released, _ := s.reg.Created(ctx, target, v)
+		it.Newest = cmp.Or(it.Newest, v)
+		it.add(OK, time.Time{}, "", "%s is out, %s; e pins to it", v, s.ago(released, "released"))
 	}
-	if newer == "" {
-		return
-	}
-	released, _ := s.reg.Created(ctx, target, newer)
-	it.add(s.level(released, it.due(duePinned)), released, "new version", "%s → %s, %s", target.Tag, newer, s.ago(released, "released"))
-	if !it.Updatable() {
-		return
-	}
-	e, err := imageEdit(it.Project.Files, it.Service, it.Image, target.Name+":"+newer)
-	if err != nil {
-		it.add(OK, time.Time{}, "", "set %s by hand: %v", newer, err)
-		return
-	}
-	it.Edits = []Edit{e}
 }
 
 // built checks an image compose builds: how old the build is, whether its

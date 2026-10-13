@@ -274,7 +274,7 @@ func (m *Model) columns(rows []row, inner int) cols {
 	for _, r := range rows {
 		if !r.head {
 			c.name = max(c.name, lipgloss.Width(short(r.items[0], r.group)))
-			c.kind = max(c.kind, min(lipgloss.Width(kindWord(r.items[0])), 18))
+			c.kind = max(c.kind, min(lipgloss.Width(kindWord(r.items[0])), 24))
 		}
 	}
 	c.name = min(c.name, max(8, inner-4-c.state-c.kind-waitW-6))
@@ -293,6 +293,9 @@ func kindWord(it scan.Item) string {
 	case "own build":
 		return "build"
 	case "pinned":
+		if it.Newest != "" {
+			return "pinned " + registry.Parse(it.Image).Tag + " ↑" + it.Newest
+		}
 		return "pinned " + registry.Parse(it.Image).Tag
 	case "digest":
 		return "pinned digest"
