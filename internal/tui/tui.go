@@ -35,7 +35,7 @@ type Model struct {
 	dryRun  bool // Enter shows what it would run, and runs nothing
 
 	items    []scan.Item
-	all      bool // show current ones too
+	all      bool // show the up-to-date ones too: the start
 	pick     int  // row
 	top      int  // first row shown
 	scanning bool
@@ -81,7 +81,7 @@ type installedMsg struct {
 // Run shows the screen until the user leaves. It returns a program to
 // start in its place when scurvy updated itself.
 func Run(ctx context.Context, host, version string, dryRun bool) (string, error) {
-	m := &Model{ctx: ctx, host: host, version: version, dryRun: dryRun, done: new(atomic.Int64)}
+	m := &Model{ctx: ctx, host: host, version: version, dryRun: dryRun, all: true, done: new(atomic.Int64)}
 	_, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
 	return m.Restart, err
 }
