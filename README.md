@@ -11,22 +11,30 @@ curl -fsSL https://github.com/chriopter/scurvy/releases/latest/download/install.
 scurvy        # -n: show every step of an update, run none
 ```
 
-- 🟢 **up to date**: nothing newer
-- 🔵 **update available**: a new image or version is there
-- 🟡 **update overdue**: waiting too long (14 days for an image, 90 for a version, 30 for a build)
-- 🔴 **end of life**: its base (alpine, debian, python, node, …) gets no fixes any more
-- ⚪ **not checked**: the registry did not answer, or the image is private
+## How it works
 
-## What Enter does
+scurvy finds the running containers and reads their compose files and Dockerfiles. It asks the registries what each tag points to now, and [endoflife.date](https://endoflife.date) whether the base still gets fixes; nothing is pulled to check.
 
-- 📦 **`image: app:latest`**: pulls the new image, restarts.
-- 📌 **`image: postgres:16.4`**: writes `16.6` into the compose file, pulls, restarts.
-- 🔨 **`build:`**: raises a pinned `FROM` (and its `-builder` stages), rebuilds, restarts.
-- 🌿 **`build:` from a git clone**: `git pull` first, then rebuilds.
-- 🧩 **a stack with `docker-update.sh`**: runs that script instead.
-- 🚫 **pinned by digest, another tool's, `docker run`**: shown, never touched.
+| status | means |
+|---|---|
+| up to date | nothing newer |
+| update available | a new image or version is there |
+| update overdue | waiting too long: 14 days for an image, 90 for a version, 30 for a build |
+| end of life | the base (alpine, debian, python, node, …) gets no fixes any more |
+| not checked | the registry did not answer, or the image is private |
 
-Before, it keeps the running image as a backup; after, it waits until the containers are healthy. If anything fails, it puts everything back. [Details](docs/how.md)
+Enter keeps the running image as a backup, updates, and waits until the containers are healthy. If anything fails, it puts everything back.
+
+| container | Enter |
+|---|---|
+| `image: app:latest` | pulls, restarts |
+| `image: postgres:16.4` | writes `16.6` into the compose file, pulls, restarts |
+| `build:` | raises a pinned `FROM` and its `-builder` stages, rebuilds, restarts |
+| `build:` from a git clone | `git pull`, rebuilds, restarts |
+| stack with `docker-update.sh` | runs that script |
+| pinned by digest, another tool's, `docker run` | nothing |
+
+[Details](docs/how.md)
 
 ## Development
 
