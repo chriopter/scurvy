@@ -1,45 +1,43 @@
-// Package tui is scurvy's screen: the crew by stack, sickest first. ↑↓
-// picks a container or a whole stack, Enter updates it, r looks again,
-// a shows the healthy ones too, u updates scurvy itself, q leaves.
+// Package tui is scurvy's screen, two panels side by side as in lazygit:
+// the containers by stack on the left, on the right what the picked one is
+// about, or the update running now, line by line. ↑↓ picks a container or
+// a stack, Enter updates it, r looks again, a shows the current ones too,
+// u updates scurvy itself, q leaves.
 package tui
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"os/exec"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/chriopter/scurvy/internal/fix"
 	"github.com/chriopter/scurvy/internal/scan"
 	"github.com/chriopter/scurvy/internal/update"
 )
 
-// ItemEnv carries what to update from the screen to `scurvy fix`: one item
-// or a list of them, as JSON.
-const ItemEnv = "SCURVY_ITEM"
-
-// row is a line one can pick: a stack, or a container.
+// row is a line one can pick: a section, or a container.
 type row struct {
-	group string      // the stack's name; empty for a container on its own
-	items []scan.Item // header: the stack's containers on screen; else one
+	group string      // the section's stack; empty: standalone
+	items []scan.Item // header: the section's containers on screen; else one
 	head  bool
-	sub   bool // a container under its section's header
-	total int  // header: all containers of the section, shown or not
+	total int // header: all containers of the section, shown or not
 }
 
 // Model is the screen's state.
 type Model struct {
-	host, version string
-	dryRun        bool // Enter shows what it would run, and runs nothing
+	ctx     context.Context
+	host    string
+	version string
+	dryRun  bool // Enter shows what it would run, and runs nothing
 
 	items    []scan.Item
-	all      bool // show healthy ones too
+	all      bool // show current ones too
 	pick     int  // row
-	top      int  // first body line shown
+	top      int  // first row shown
 	scanning bool
 	done     *atomic.Int64 // scan progress, packed done<<32|total
 	err      error
@@ -48,10 +46,19 @@ type Model struct {
 	width    int
 	height   int
 
-	newer    update.Release // a newer scurvy, once known
-	checking bool           // looking for one now
-	askSelf  bool           // asking whether to install it
-	Restart  string         // after quitting: start this program again
+	// The update running, or the last one: its output, line by line.
+	updating bool
+	logName  string
+	log      []string
+	lines    chan string
+	result   chan error
+	outcome  string // after it: how it went
+
+	newer      update.Release // a newer scurvy, once known
+	checking   bool           // looking for one now
+	askSelf    bool           // asking whether to install it
+	installing bool
+	Restart    string // after quitting: start this program again
 }
 
 type scannedMsg struct {
@@ -59,26 +66,23 @@ type scannedMsg struct {
 	err   error
 }
 type tickMsg struct{}
-type fixedMsg struct {
-	name string
-	err  error
-}
+type lineMsg string
+type fixedMsg struct{ err error }
 type latestMsg struct {
 	rel   update.Release
 	err   error
 	asked bool // the user pressed u
 }
 type installedMsg struct {
-	path, tag string
-	err       error
+	path string
+	err  error
 }
 
 // Run shows the screen until the user leaves. It returns a program to
 // start in its place when scurvy updated itself.
-func Run(version string, dryRun bool) (string, error) {
-	host, _ := os.Hostname()
-	m := &Model{host: host, version: version, dryRun: dryRun, done: new(atomic.Int64), scanning: true}
-	_, err := tea.NewProgram(m).Run()
+func Run(ctx context.Context, host, version string, dryRun bool) (string, error) {
+	m := &Model{ctx: ctx, host: host, version: version, dryRun: dryRun, done: new(atomic.Int64)}
+	_, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
 	return m.Restart, err
 }
 
@@ -97,19 +101,20 @@ func tick() tea.Cmd {
 func (m *Model) scan() tea.Cmd {
 	m.scanning = true
 	m.done.Store(0)
-	done := m.done
+	done, ctx := m.done, m.ctx
 	return func() tea.Msg {
-		items, err := scan.Scan(context.Background(), func(d, t int) {
-			done.Store(int64(d)<<32 | int64(t))
-		})
+		ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		defer cancel()
+		items, err := scan.Scan(ctx, func(d, t int) { done.Store(int64(d)<<32 | int64(t)) })
 		return scannedMsg{items, err}
 	}
 }
 
 func (m *Model) lookForUpdate(asked bool) tea.Cmd {
 	m.checking = true
+	ctx := m.ctx
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		rel, err := update.Latest(ctx)
 		return latestMsg{rel, err, asked}
@@ -117,25 +122,24 @@ func (m *Model) lookForUpdate(asked bool) tea.Cmd {
 }
 
 func (m *Model) installSelf() tea.Cmd {
-	tag := m.newer.Tag
+	m.installing = true
+	tag, ctx := m.newer.Tag, m.ctx
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 		path, err := update.Install(ctx, tag)
-		return installedMsg{path, tag, err}
+		return installedMsg{path, err}
 	}
 }
 
-func failed(it scan.Item) bool { return it.Err != "" && it.Level == scan.OK }
-
-func needs(it scan.Item) bool { return it.Level > scan.OK || it.Err != "" }
+func needs(it scan.Item) bool { return it.Level > scan.OK || it.Unchecked() }
 
 // rows are the sections and their containers: one section per compose
 // stack, the sickest first, and one for containers standing alone (on
-// their own or the only one of their stack). Healthy ones show with a.
+// their own, or the only one of their stack). Current ones show with a.
 func (m *Model) rows() []row {
 	type section struct {
-		name  string // empty: standalone
+		name  string
 		items []scan.Item
 		worst scan.Level
 	}
@@ -147,7 +151,7 @@ func (m *Model) rows() []row {
 	var secs []*section
 	for _, it := range m.items {
 		key := it.Project.Name
-		if key == "" || count[key] == 1 && it.Service == key {
+		if count[key] == 1 && it.Service == key {
 			key = ""
 		}
 		s := byName[key]
@@ -183,10 +187,19 @@ func (m *Model) rows() []row {
 		scan.Sort(shown)
 		out = append(out, row{group: s.name, items: shown, head: true, total: len(s.items)})
 		for _, it := range shown {
-			out = append(out, row{group: s.name, items: []scan.Item{it}, sub: true})
+			out = append(out, row{group: s.name, items: []scan.Item{it}})
 		}
 	}
 	return out
+}
+
+// picked is the row under the cursor; ok is false when there is none.
+func (m *Model) picked() (row, bool) {
+	rows := m.rows()
+	if m.pick < 0 || m.pick >= len(rows) {
+		return row{}, false
+	}
+	return rows[m.pick], true
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -200,15 +213,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case scannedMsg:
 		m.scanning = false
 		m.items, m.err = msg.items, msg.err
-		m.pick = min(m.pick, max(0, len(m.rows())-1))
+		m.pick = max(0, min(m.pick, len(m.rows())-1))
+	case lineMsg:
+		m.log = append(m.log, string(msg))
+		if len(m.log) > 2000 {
+			m.log = m.log[len(m.log)-2000:]
+		}
+		return m, m.nextLine()
 	case fixedMsg:
+		m.updating = false
 		switch {
 		case msg.err != nil:
-			m.note = sDue.Render("✗ " + msg.name + " still has scurvy")
+			m.outcome = sErr.Render("✗ " + m.logName + ": " + msg.err.Error())
 		case m.dryRun:
-			m.note = sDim.Render("dry run: " + msg.name + " was not changed")
+			m.outcome = sDim.Render("dry run: " + m.logName + " was not changed")
 		default:
-			m.note = sOK.Render("✓ " + msg.name + " is shipshape again")
+			m.outcome = sOK.Render("✓ " + m.logName + " is shipshape again")
 		}
 		return m, tea.Batch(m.scan(), tick())
 	case latestMsg:
@@ -220,13 +240,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case update.Newer(msg.rel.Tag, m.version):
 			m.newer = msg.rel
-			if msg.asked {
-				m.askSelf = true
-			}
+			m.askSelf = msg.asked
 		case msg.asked:
 			m.note = sDim.Render("scurvy " + m.version + " is the newest")
 		}
 	case installedMsg:
+		m.installing = false
 		if msg.err != nil {
 			m.note = sErr.Render("✗ " + msg.err.Error())
 			return m, nil
@@ -241,30 +260,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) key(k string) tea.Cmd {
 	rows := m.rows()
-	yes := k == "y" || k == "enter" || k == "j"
-	if m.askSelf {
+	yes := k == "y" || k == "enter"
+	switch {
+	case m.askSelf:
 		m.askSelf = false
 		if yes {
 			m.note = sDim.Render("installing scurvy " + m.newer.Tag + "…")
 			return m.installSelf()
 		}
 		return nil
-	}
-	if m.confirm {
+	case m.confirm:
 		m.confirm = false
-		if yes && m.pick < len(rows) {
-			return m.fix(rows[m.pick])
+		if r, ok := m.picked(); ok && yes {
+			return m.startFix(r)
 		}
-		m.note = ""
 		return nil
 	}
 	switch k {
-	case "q", "ctrl+c", "esc":
+	case "q", "ctrl+c":
+		if m.updating {
+			m.note = sDue.Render("an update is running; q again once it is done")
+			return nil
+		}
 		return tea.Quit
+	case "esc":
+		if !m.updating {
+			m.log, m.outcome = nil, "" // back to the details
+		}
 	case "up", "k":
 		m.pick = max(0, m.pick-1)
 	case "down", "j":
-		m.pick = min(len(rows)-1, m.pick+1)
+		m.pick = max(0, min(len(rows)-1, m.pick+1))
 	case "home", "g":
 		m.pick = 0
 	case "end", "G":
@@ -273,39 +299,41 @@ func (m *Model) key(k string) tea.Cmd {
 		m.all = !m.all
 		m.pick, m.top = 0, 0
 	case "r":
-		if !m.scanning {
+		if !m.scanning && !m.updating {
 			m.note = ""
 			return tea.Batch(m.scan(), tick())
 		}
 	case "u":
-		if !update.Managed(m.version) {
+		switch {
+		case m.dryRun:
+			m.note = sDim.Render("dry run: scurvy does not update itself either")
+		case !update.Managed(m.version):
 			m.note = sDim.Render("this scurvy is a " + m.version + " build: it does not update itself")
-			return nil
-		}
-		if m.newer.Tag != "" {
+		case m.installing, m.checking:
+		case m.newer.Tag != "":
 			m.askSelf = true
-			return nil
-		}
-		if !m.checking {
+		default:
 			m.note = sDim.Render("looking for a newer scurvy…")
 			return m.lookForUpdate(true)
 		}
 	case "enter", "space":
-		if m.scanning || m.pick >= len(rows) {
-			return nil
+		r, ok := m.picked()
+		switch {
+		case !ok || m.scanning:
+		case m.updating:
+			m.note = sDim.Render("one update at a time")
+		case len(targets(r)) == 0:
+			m.note = sDim.Render(name(r) + ": nothing scurvy can update here")
+		default:
+			m.note = ""
+			m.confirm = true
 		}
-		r := rows[m.pick]
-		if len(targets(r)) == 0 {
-			m.note = sDim.Render(name(r) + " has no compose file here: update it where it was started")
-			return nil
-		}
-		m.confirm = true
 	}
 	return nil
 }
 
 // targets are what Enter updates on a row: a container, or the containers
-// of a stack that need it (all of them, when none does).
+// of a section that need it (all of them, when none does).
 func targets(r row) []scan.Item {
 	var sick, all []scan.Item
 	for _, it := range r.items {
@@ -324,29 +352,70 @@ func targets(r row) []scan.Item {
 }
 
 func name(r row) string {
-	if r.head {
-		if r.group == "" {
-			return "the standalone containers"
-		}
+	switch {
+	case r.head && r.group == "":
+		return "standalone"
+	case r.head:
 		return r.group
 	}
 	return r.items[0].Name()
 }
 
-// fix leaves the screen to update in the open terminal, so the docker
-// output scrolls by, and comes back to look again.
-func (m *Model) fix(r row) tea.Cmd {
-	todo := targets(r)
-	self, err := os.Executable()
-	if err != nil {
-		return func() tea.Msg { return fixedMsg{name(r), err} }
+// startFix runs the update in the background and shows its output on the
+// right, line by line, while the list stays.
+func (m *Model) startFix(r row) tea.Cmd {
+	plans, _ := fix.Plans(targets(r))
+	m.updating, m.logName, m.log, m.outcome = true, name(r), nil, ""
+	m.lines, m.result = make(chan string, 256), make(chan error, 1)
+	lines, result, ctx := m.lines, m.result, m.ctx
+	go func() {
+		w := &lineWriter{out: lines}
+		var err error
+		for _, p := range plans {
+			if err = fix.Run(ctx, p, w); err != nil {
+				break
+			}
+		}
+		w.flush()
+		result <- err
+		close(lines)
+	}()
+	return m.nextLine()
+}
+
+// nextLine waits for the update's next line, or its end.
+func (m *Model) nextLine() tea.Cmd {
+	lines, result := m.lines, m.result
+	return func() tea.Msg {
+		l, ok := <-lines
+		if !ok {
+			return fixedMsg{<-result}
+		}
+		return lineMsg(l)
 	}
-	// What was found goes along, so fix need not look again.
-	data, err := json.Marshal(todo)
-	if err != nil {
-		return func() tea.Msg { return fixedMsg{name(r), err} }
+}
+
+// lineWriter turns output into lines, also at carriage returns.
+type lineWriter struct {
+	out     chan<- string
+	partial strings.Builder
+}
+
+func (w *lineWriter) Write(p []byte) (int, error) {
+	for _, b := range p {
+		switch b {
+		case '\n', '\r':
+			w.flush()
+		default:
+			w.partial.WriteByte(b)
+		}
 	}
-	cmd := exec.Command(self, "fix")
-	cmd.Env = append(os.Environ(), ItemEnv+"="+string(data))
-	return tea.ExecProcess(cmd, func(err error) tea.Msg { return fixedMsg{name(r), err} })
+	return len(p), nil
+}
+
+func (w *lineWriter) flush() {
+	if w.partial.Len() > 0 {
+		w.out <- w.partial.String()
+		w.partial.Reset()
+	}
 }
