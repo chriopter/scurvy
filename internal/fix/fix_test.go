@@ -105,3 +105,9 @@ func TestQuote(t *testing.T) {
 		}
 	}
 }
+
+func TestTagSafe(t *testing.T) {
+	if got := tagSafe("my service/1"); got != "my-service-1" {
+		t.Errorf("got %q", got)
+	}
+}

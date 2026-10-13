@@ -35,9 +35,10 @@ type Model struct {
 	dryRun  bool // Enter shows what it would run, and runs nothing
 
 	items    []scan.Item
-	all      bool // show the up-to-date ones too: the start
-	pick     int  // row
-	top      int  // first row shown
+	all      bool            // show the up-to-date ones too: the start
+	marked   map[string]bool // container IDs marked with space
+	pick     int             // row
+	top      int             // first row shown
 	scanning bool
 	done     *atomic.Int64 // scan progress, packed done<<32|total
 	err      error
@@ -226,7 +227,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.err != nil:
 			m.outcome = sErr.Render("✗ " + m.logName + ": " + msg.err.Error())
 		case m.dryRun:
-			m.outcome = sDim.Render("dry run: " + m.logName + " was not changed")
+			m.outcome = sDim.Render("dry run: nothing was changed")
 		default:
 			m.outcome = sOK.Render("✓ " + m.logName + " is shipshape again")
 		}
@@ -271,8 +272,8 @@ func (m *Model) key(k string) tea.Cmd {
 		return nil
 	case m.confirm:
 		m.confirm = false
-		if r, ok := m.picked(); ok && yes {
-			return m.startFix(r)
+		if todo, what := m.todo(); yes && len(todo) > 0 {
+			return m.startFix(todo, what)
 		}
 		return nil
 	}
@@ -316,20 +317,74 @@ func (m *Model) key(k string) tea.Cmd {
 			m.note = sDim.Render("looking for a newer scurvy…")
 			return m.lookForUpdate(true)
 		}
-	case "enter", "space":
-		r, ok := m.picked()
+	case "space":
+		if r, ok := m.picked(); ok && !m.updating {
+			m.toggle(r)
+		}
+	case "enter":
+		todo, _ := m.todo()
 		switch {
-		case !ok || m.scanning:
+		case m.scanning:
 		case m.updating:
 			m.note = sDim.Render("one update at a time")
-		case len(targets(r)) == 0:
-			m.note = sDim.Render(name(r) + ": nothing scurvy can update here")
+		case len(todo) == 0:
+			m.note = sDim.Render("nothing scurvy can update here")
 		default:
 			m.note = ""
 			m.confirm = true
 		}
 	}
 	return nil
+}
+
+// toggle marks a container, or all of a group's that scurvy can update;
+// again, it unmarks them.
+func (m *Model) toggle(r row) {
+	can := targets(r)
+	if r.head {
+		can = nil
+		for _, it := range r.items {
+			if it.Updatable() {
+				can = append(can, it)
+			}
+		}
+	}
+	if len(can) == 0 {
+		m.note = sDim.Render(name(r) + ": nothing scurvy can update here")
+		return
+	}
+	if m.marked == nil {
+		m.marked = map[string]bool{}
+	}
+	all := true
+	for _, it := range can {
+		all = all && m.marked[it.Container.ID]
+	}
+	for _, it := range can {
+		if all {
+			delete(m.marked, it.Container.ID)
+		} else {
+			m.marked[it.Container.ID] = true
+		}
+	}
+}
+
+// todo is what Enter updates: the marked containers, else the picked row's;
+// and what to call it.
+func (m *Model) todo() ([]scan.Item, string) {
+	if len(m.marked) > 0 {
+		var out []scan.Item
+		for _, it := range m.items {
+			if m.marked[it.Container.ID] {
+				out = append(out, it)
+			}
+		}
+		return out, plural(len(out), "marked container")
+	}
+	if r, ok := m.picked(); ok {
+		return targets(r), name(r)
+	}
+	return nil, ""
 }
 
 // targets are what Enter updates on a row: a container, or the containers
@@ -363,9 +418,10 @@ func name(r row) string {
 
 // startFix runs the update in the background and shows its output on the
 // right, line by line, while the list stays.
-func (m *Model) startFix(r row) tea.Cmd {
-	plans, _ := fix.Plans(targets(r))
-	m.updating, m.logName, m.log, m.outcome = true, name(r), nil, ""
+func (m *Model) startFix(todo []scan.Item, what string) tea.Cmd {
+	plans, _ := fix.Plans(todo)
+	m.updating, m.logName, m.log, m.outcome = true, what, nil, ""
+	m.marked = nil
 	m.lines, m.result = make(chan string, 256), make(chan error, 1)
 	lines, result, ctx := m.lines, m.result, m.ctx
 	go func() {
