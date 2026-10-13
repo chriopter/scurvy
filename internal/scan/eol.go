@@ -91,18 +91,18 @@ type cycle struct {
 	EOL      any    `json:"eol"` // a date, or true/false
 }
 
-// EOL looks up end-of-life dates on endoflife.date, once per product.
-type EOL struct {
+// eolDates looks up end-of-life dates on endoflife.date, once per product.
+type eolDates struct {
 	http *http.Client
 	mu   sync.Mutex
 	data map[string][]cycle
 }
 
-func NewEOL() *EOL {
-	return &EOL{http: &http.Client{Timeout: 15 * time.Second}, data: map[string][]cycle{}}
+func newEOLDates() *eolDates {
+	return &eolDates{http: &http.Client{Timeout: 15 * time.Second}, data: map[string][]cycle{}}
 }
 
-func (e *EOL) cycles(ctx context.Context, product string) ([]cycle, error) {
+func (e *eolDates) cycles(ctx context.Context, product string) ([]cycle, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock() // one product at a time; the answers are small
 	if c, ok := e.data[product]; ok {
@@ -129,7 +129,7 @@ func (e *EOL) cycles(ctx context.Context, product string) ([]cycle, error) {
 }
 
 // End is when a release stops getting fixes; zero when unknown or not set.
-func (e *EOL) End(ctx context.Context, rel release) time.Time {
+func (e *eolDates) End(ctx context.Context, rel release) time.Time {
 	cs, err := e.cycles(ctx, rel.product)
 	if err != nil {
 		return time.Time{}
