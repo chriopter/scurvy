@@ -1,9 +1,14 @@
 package scan
 
 import (
+	"context"
+	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/chriopter/scurvy/internal/registry"
 )
 
 // A pinned tag is a plain version: 10.11.11, v2.3, 3.19. Tags with a word
@@ -65,4 +70,26 @@ func majorOf(tag string) string {
 		p = "v" + p
 	}
 	return p
+}
+
+// Versions lists the versions an image could be pinned to: the tags of
+// the same shape as its own (10.11.11: three numbers), newest first.
+func Versions(ctx context.Context, image string) ([]string, error) {
+	ref := registry.Parse(image)
+	if !pinned(ref.Tag) {
+		return nil, fmt.Errorf("%s is not pinned to a version", image)
+	}
+	tags, err := registry.New().Tags(ctx, ref, "")
+	if err != nil {
+		return nil, err
+	}
+	c, v := numbers(ref.Tag), strings.HasPrefix(ref.Tag, "v")
+	var out []string
+	for _, t := range tags {
+		if pinned(t) && strings.HasPrefix(t, "v") == v && len(numbers(t)) == len(c) {
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(a, b int) bool { return less(numbers(out[b]), numbers(out[a])) })
+	return out, nil
 }

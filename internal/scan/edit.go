@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/chriopter/scurvy/internal/registry"
 )
 
 // Edit changes one line of one file. Old is the whole line as scurvy read
@@ -113,3 +115,10 @@ func readLines(file string) ([]string, error) {
 }
 
 func isLetter(c byte) bool { return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' }
+
+// PinEdit is the edit that pins a container's image to tag: its own
+// image: line in the compose files.
+func PinEdit(it Item, tag string) (Edit, error) {
+	ref := registry.Parse(it.Image)
+	return imageEdit(it.Project.Files, it.Service, it.Image, ref.Name+":"+tag)
+}

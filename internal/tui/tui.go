@@ -16,6 +16,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/chriopter/scurvy/internal/fix"
+	"github.com/chriopter/scurvy/internal/registry"
 	"github.com/chriopter/scurvy/internal/scan"
 	"github.com/chriopter/scurvy/internal/update"
 )
@@ -57,11 +58,30 @@ type Model struct {
 	result   chan error
 	outcome  string // after it: how it went
 
+	pin *pinning // choosing a version to pin to (e)
+
 	newer      update.Release // a newer scurvy, once known
 	checking   bool           // looking for one now
 	askSelf    bool           // asking whether to install it
 	installing bool
 	Restart    string // after quitting: start this program again
+}
+
+// pinning is the version chooser of e: the container, the versions its
+// image could be pinned to, the one under the cursor, and, once chosen,
+// the edit to confirm.
+type pinning struct {
+	it       scan.Item
+	versions []string
+	pick     int
+	loading  bool
+	err      string
+	edit     *scan.Edit
+}
+
+type versionsMsg struct {
+	versions []string
+	err      error
 }
 
 type scannedMsg struct {
@@ -224,6 +244,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scanning = false
 		m.items, m.err = msg.items, msg.err
 		m.pick = max(0, min(m.pick, len(m.rows())-1))
+	case versionsMsg:
+		if m.pin != nil {
+			m.pin.loading = false
+			m.pin.versions = msg.versions
+			if msg.err != nil {
+				m.pin.err = msg.err.Error()
+			}
+			for i, v := range msg.versions {
+				if v == registry.Parse(m.pin.it.Image).Tag {
+					m.pin.pick = i
+				}
+			}
+		}
 	case lineMsg:
 		m.log = append(m.log, string(msg))
 		if len(m.log) > 2000 {
@@ -271,6 +304,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) key(k string) tea.Cmd {
 	rows := m.rows()
 	yes := k == "y" || k == "Y" || k == "enter"
+	if m.pin != nil {
+		return m.pinKey(k, yes)
+	}
 	switch {
 	case m.askSelf:
 		m.askSelf = false
@@ -329,6 +365,22 @@ func (m *Model) key(k string) tea.Cmd {
 		default:
 			m.note = sDim.Render("looking for a newer scurvy…")
 			return m.lookForUpdate(true)
+		}
+	case "e":
+		r, ok := m.picked()
+		switch {
+		case !ok || r.head || m.updating:
+		case r.items[0].Source() != "pinned":
+			m.note = sDim.Render(r.items[0].Name() + " is not pinned to a version; e changes a version in image:")
+		default:
+			m.pin = &pinning{it: r.items[0], loading: true}
+			image, ctx := r.items[0].Image, m.ctx
+			return func() tea.Msg {
+				ctx, cancel := context.WithTimeout(ctx, time.Minute)
+				defer cancel()
+				v, err := scan.Versions(ctx, image)
+				return versionsMsg{v, err}
+			}
 		}
 	case "space":
 		if r, ok := m.picked(); ok && !m.updating {
@@ -504,4 +556,43 @@ func whyNot(r row, ok bool) string {
 		return name(r) + ": pinned by digest; change the digest in the compose file"
 	}
 	return name(r) + ": nothing scurvy can update here"
+}
+
+// pinKey handles keys while choosing a version, then while confirming it.
+func (m *Model) pinKey(k string, yes bool) tea.Cmd {
+	p := m.pin
+	if p.edit != nil {
+		if yes {
+			it := p.it
+			it.Edits = []scan.Edit{*p.edit}
+			m.pin = nil
+			return m.startFix([]scan.Item{it}, it.Name(), false)
+		}
+		p.edit = nil // back to the versions
+		return nil
+	}
+	switch k {
+	case "esc", "q", "e":
+		m.pin = nil
+	case "up", "k":
+		p.pick = max(0, p.pick-1)
+	case "down", "j":
+		p.pick = max(0, min(len(p.versions)-1, p.pick+1))
+	case "enter":
+		if p.loading || p.pick >= len(p.versions) {
+			return nil
+		}
+		v := p.versions[p.pick]
+		if v == registry.Parse(p.it.Image).Tag {
+			p.err = p.it.Name() + " is pinned to " + v + " already"
+			return nil
+		}
+		e, err := scan.PinEdit(p.it, v)
+		if err != nil {
+			p.err = err.Error()
+			return nil
+		}
+		p.err, p.edit = "", &e
+	}
+	return nil
 }

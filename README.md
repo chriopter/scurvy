@@ -29,7 +29,7 @@ Containers of one compose stack stand together. The right panel tells everything
 
 ## What Enter does
 
-<kbd>Enter</kbd> updates the picked container, or on a stack's line all of its; <kbd>space</kbd> marks several to update at once; <kbd>R</kbd> rebuilds from scratch, without the build cache.
+<kbd>Enter</kbd> updates the picked container, or on a stack's line all of its; <kbd>space</kbd> marks several to update at once; <kbd>R</kbd> rebuilds from scratch, without the build cache; <kbd>e</kbd> on a pinned container picks another version to pin to.
 
 | type | image comes from | Enter |
 |---|---|---|
