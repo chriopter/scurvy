@@ -29,7 +29,7 @@ Containers of one compose stack stand together. The right panel tells everything
 
 ## What Enter does
 
-<kbd>Enter</kbd> updates the picked container or stack; <kbd>space</kbd> marks several to update at once.
+<kbd>Enter</kbd> updates the picked container, or on a stack's line all of its; <kbd>space</kbd> marks several to update at once; <kbd>R</kbd> rebuilds from scratch, without the build cache.
 
 | type | image comes from | Enter |
 |---|---|---|
@@ -45,11 +45,24 @@ A stack with its own `docker-update.sh` gets that script run instead. Before eve
 ## Command line
 
 ```sh
-scurvy -n          # the screen, but Enter only shows what it would run
-scurvy list        # the update state of every container, as text: for scripts and checks
-scurvy fix web     # update one container, or a stack, without the screen
-scurvy update      # update scurvy itself
+scurvy -n               # the screen, but Enter only shows what it would change
+scurvy list             # the update state of every container, as text
+scurvy list --influx    # the same as InfluxDB lines, for Telegraf
+scurvy fix web          # update one container (or stack/service), or a stack
+scurvy update           # update scurvy itself
 ```
+
+For Grafana, let Telegraf ask every few hours; each run asks the registries:
+
+```toml
+[[inputs.exec]]
+  commands = ["sudo -n /usr/local/bin/scurvy list --influx"]
+  interval = "6h"
+  timeout = "120s"
+  data_format = "influx"
+```
+
+Each container becomes a point `scurvy,stack=…,container=…,type=…` with `state`, `level` (0 up to date, 1 available, 2 overdue, 3 end of life, -1 not checked) and `waiting_days`.
 
 ## Development
 

@@ -22,7 +22,7 @@ func ago(days int) time.Time { return time.Now().Add(-time.Duration(days) * 24 *
 
 func item(project, service, image string, kind scan.Kind, current string, level scan.Level, short, text string, since time.Time) scan.Item {
 	it := scan.Item{
-		Container: docker.Container{Name: service, Labels: map[string]string{}},
+		Container: docker.Container{ID: project + "/" + service, Name: service, Labels: map[string]string{}},
 		Project:   docker.Project{Name: project, Dir: "/srv/" + project, Files: []string{"/srv/" + project + "/compose.yaml"}},
 		Service:   service,
 		Kind:      kind,

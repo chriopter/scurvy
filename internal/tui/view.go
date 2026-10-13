@@ -121,7 +121,14 @@ func (m *Model) render() string {
 		panels = lipgloss.JoinVertical(lipgloss.Left,
 			m.listPanel(w, area-rh), m.rightPanel(w, rh))
 	}
-	return strings.Join([]string{m.titleLine(w), m.counts(), panels, m.status(w), m.help(w)}, "\n")
+	screen := strings.Join([]string{m.titleLine(w), m.counts(), panels, m.status(w), m.help(w)}, "\n")
+	if !m.confirm {
+		return screen
+	}
+	box := m.popup(w)
+	x := max(0, (w-lipgloss.Width(box))/2)
+	y := max(0, (h-lipgloss.Height(box))/2)
+	return lipgloss.NewCompositor(lipgloss.NewLayer(screen), lipgloss.NewLayer(box).X(x).Y(y).Z(1)).Render()
 }
 
 // panel draws a framed box with its title in the top edge, as lazygit
@@ -179,11 +186,11 @@ func (m *Model) counts() string {
 	if len(m.items) == 0 {
 		return ""
 	}
-	return " " + chips(m.items, true)
+	return " " + chips(m.items)
 }
 
 // chips counts items by state, quietly: "1 overdue · 4 available".
-func chips(items []scan.Item, _ bool) string {
+func chips(items []scan.Item) string {
 	n := map[string]int{}
 	for _, it := range items {
 		n[stateOf(it).word]++
@@ -304,8 +311,16 @@ func (m *Model) line(r row, picked bool, c cols, inner int) string {
 		if title == "" {
 			title = "standalone"
 		}
-		head := on(sDim).Render(title + " ")
-		return head + on(sFaint).Render(strings.Repeat("─", max(0, inner-lipgloss.Width(head))))
+		worst := stCurrent
+		for _, it := range r.items {
+			if st := stateOf(it); rank(st) > rank(worst) {
+				worst = st
+			}
+		}
+		head := on(sBold).Render(title)
+		rule := on(sFaint).Render(" " + strings.Repeat("─", max(1, c.name+2-lipgloss.Width(head))) + " ")
+		line := head + rule + on(worst.style()).Render(worst.word) + on(sFaint).Render(" ")
+		return line + on(sFaint).Render(strings.Repeat("─", max(0, inner-lipgloss.Width(line))))
 	}
 	it := r.items[0]
 	st := stateOf(it)
@@ -316,7 +331,7 @@ func (m *Model) line(r row, picked bool, c cols, inner int) string {
 	gap := on(lipgloss.NewStyle()).Render("  ")
 	mark := on(lipgloss.NewStyle()).Render("  ")
 	if m.marked[it.Container.ID] {
-		mark = on(lipgloss.NewStyle().Foreground(cActive).Bold(true)).Render("● ")
+		mark = on(lipgloss.NewStyle().Foreground(cActive).Bold(true)).Render("* ")
 	}
 	line := mark + cellOn(on(sText).Render(short(it, r.group)), c.name, on) + gap +
 		cellOn(on(st.style()).Render(st.word), c.state, on) + gap +
@@ -328,20 +343,6 @@ func (m *Model) line(r row, picked bool, c cols, inner int) string {
 // cellOn fits styled text into n cells, the fill styled too.
 func cellOn(s string, n int, on func(lipgloss.Style) lipgloss.Style) string {
 	return fit(s, n, on)
-}
-
-func chipsOn(items []scan.Item, on func(lipgloss.Style) lipgloss.Style) string {
-	n := map[string]int{}
-	for _, it := range items {
-		n[stateOf(it).word]++
-	}
-	var out []string
-	for _, st := range states {
-		if c := n[st.word]; c > 0 {
-			out = append(out, on(st.style()).Render(fmt.Sprintf("%s%d", st.sign, c)))
-		}
-	}
-	return strings.Join(out, on(lipgloss.NewStyle()).Render(" "))
 }
 
 // cell fits styled text into n cells.
@@ -394,7 +395,7 @@ func (m *Model) rightPanel(w, h int) string {
 			frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 			title += " " + sAccent.Render(frames[int(time.Now().UnixMilli()/80)%len(frames)])
 		}
-		lines := m.log
+		lines := append([]string{}, m.log...)
 		if m.outcome != "" {
 			lines = append(append([]string{}, lines...), "", m.outcome, sFaint.Render("esc: back to the details"))
 		}
@@ -534,8 +535,6 @@ func (m *Model) status(w int) string {
 		if len(m.newer.Points) > 0 {
 			s += sFaint.Render("   " + strings.Join(m.newer.Points, " · "))
 		}
-	case m.confirm:
-		s = q(m.confirmText())
 	case m.scanning && len(m.items) > 0:
 		s = " " + sDim.Render("looking again…")
 	case m.note != "":
@@ -560,12 +559,40 @@ func (m *Model) help(w int) string {
 		k.Render("↑/↓") + " " + sFaint.Render("move"),
 		k.Render("space") + " " + sFaint.Render("mark"),
 		k.Render("enter") + " " + sFaint.Render("update"),
+		k.Render("R") + " " + sFaint.Render("rebuild from scratch"),
 		k.Render("a") + " " + sFaint.Render(all),
 		k.Render("r") + " " + sFaint.Render("look again"),
 		k.Render("u") + " " + sFaint.Render(self),
 		k.Render("q") + " " + sFaint.Render("quit"),
 	}
 	return ansi.Truncate(" "+strings.Join(parts, sFaint.Render(" • ")), w, "…")
+}
+
+// popup asks, in a box over the screen, whether to update, and lists what.
+func (m *Model) popup(w int) string {
+	todo, what := m.todo()
+	title := "Update " + what + "?"
+	if m.noCache {
+		title = "Rebuild " + what + " from scratch?"
+	}
+	lines := []string{sBold.Render(title), ""}
+	for i, it := range todo {
+		if i == 8 {
+			lines = append(lines, sDim.Render(fmt.Sprintf("  … and %d more", len(todo)-8)))
+			break
+		}
+		st := stateOf(it)
+		lines = append(lines, "  "+fit(sText.Render(it.Name()), 22)+" "+st.style().Render(st.word))
+	}
+	lines = append(lines, "")
+	if m.dryRun {
+		lines = append(lines, sDue.Render("dry run: shown, not made"))
+	}
+	lines = append(lines, sDim.Render("backed up first, put back if it fails"), "",
+		lipgloss.NewStyle().Foreground(cActive).Bold(true).Render("y")+sDim.Render(" / enter: update   ")+
+			lipgloss.NewStyle().Foreground(cDim).Bold(true).Render("n")+sDim.Render(" / esc: cancel"))
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cActive).
+		Padding(1, 3).Background(lipgloss.Color("235")).Render(strings.Join(lines, "\n"))
 }
 
 func (m *Model) confirmText() string {
@@ -590,7 +617,23 @@ func plural(n int, word string) string {
 // Snapshot draws the screen for the given containers once, as it would
 // look in a terminal of w×h with row pick chosen. It serves the README's
 // picture (tools/shot).
-func Snapshot(host string, items []scan.Item, w, h, pick int) string {
+func Snapshot(host string, items []scan.Item, w, h, pick int, marked ...int) string {
 	m := &Model{host: host, items: items, width: w, height: h, pick: pick, all: true, done: new(atomic.Int64)}
+	for _, i := range marked {
+		if m.marked == nil {
+			m.marked = map[string]bool{}
+		}
+		m.marked[items[i].Container.ID] = true
+	}
 	return m.render()
+}
+
+// rank orders states by how much they ask for: up to date least.
+func rank(st state) int {
+	for i, x := range states {
+		if x == st {
+			return len(states) - i
+		}
+	}
+	return 0
 }

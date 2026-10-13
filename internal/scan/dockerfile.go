@@ -1,12 +1,15 @@
 package scan
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
 )
 
-// base is the image a Dockerfile's built stage starts from.
+// base is the image a Dockerfile's built stage starts from; ref is empty
+// for FROM scratch.
 type base struct {
 	raw string // as written, e.g. python:${PY}-slim
 	ref string // with its ARGs filled in
@@ -18,10 +21,10 @@ var argRef = regexp.MustCompile(`\$\{(\w+)(?::?-([^}]*))?\}|\$(\w+)`)
 // named target, else the last one, followed through earlier stages (FROM
 // base AS final). args are compose's build args; they win over the
 // Dockerfile's ARG defaults. scratch has no base.
-func baseOf(path string, args map[string]*string, target string) (base, bool) {
+func baseOf(path string, args map[string]*string, target string) (base, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return base{}, false
+		return base{}, err
 	}
 	text := strings.ReplaceAll(string(data), "\\\r\n", " ")
 	text = strings.ReplaceAll(text, "\\\n", " ")
@@ -71,16 +74,21 @@ func baseOf(path string, args map[string]*string, target string) (base, bool) {
 		}
 	}
 	if target != "" {
-		return base{}, false // the target stage is not there
+		return base{}, fmt.Errorf("the Dockerfile has no stage %s", target)
 	}
 	return found(last)
 }
 
-func found(b base) (base, bool) {
-	if b.ref == "" || strings.EqualFold(b.ref, "scratch") || strings.Contains(b.ref, "$") {
-		return base{}, false
+func found(b base) (base, error) {
+	switch {
+	case b.ref == "":
+		return base{}, errors.New("the Dockerfile has no FROM")
+	case strings.EqualFold(b.ref, "scratch"):
+		return base{}, nil
+	case strings.Contains(b.ref, "$"):
+		return base{}, fmt.Errorf("the base %s depends on an ARG without a value", b.raw)
 	}
-	return b, true
+	return b, nil
 }
 
 func expand(s string, args map[string]string) string {

@@ -14,19 +14,33 @@ type Edit struct {
 	Old, New string
 }
 
-// imageEdit finds the one `image:` line among files whose value is old,
-// and gives it new. More than one such line, or none, is no edit: which
-// one compose uses is then not certain.
-func imageEdit(files []string, old, new string) (Edit, error) {
+// imageEdit finds the `image:` line of service among files, the one that
+// says old, and gives it new. Only a line inside that service's block
+// counts; none, or more than one, is no edit: which one compose uses is
+// then not certain.
+func imageEdit(files []string, service, old, new string) (Edit, error) {
 	var found []Edit
 	for _, f := range files {
 		lines, err := readLines(f)
 		if err != nil {
 			return Edit{}, err
 		}
+		in, indent := false, 0 // inside the service's block, at what depth
 		for i, l := range lines {
-			key, val, ok := strings.Cut(strings.TrimSpace(l), ":")
-			if !ok || strings.TrimSpace(key) != "image" {
+			t := strings.TrimSpace(l)
+			if t == "" || strings.HasPrefix(t, "#") {
+				continue
+			}
+			d := len(l) - len(strings.TrimLeft(l, " "))
+			if in && d <= indent {
+				in = false
+			}
+			if !in && strings.TrimSuffix(strings.Trim(strings.TrimSuffix(t, ":"), `"'`), ":") == service && strings.HasSuffix(t, ":") && d > 0 {
+				in, indent = true, d
+				continue
+			}
+			key, val, ok := strings.Cut(t, ":")
+			if !in || !ok || strings.TrimSpace(key) != "image" {
 				continue
 			}
 			val, _, _ = strings.Cut(val, " #") // a comment after the value
@@ -37,11 +51,11 @@ func imageEdit(files []string, old, new string) (Edit, error) {
 	}
 	switch len(found) {
 	case 0:
-		return Edit{}, fmt.Errorf("no image: line says %s", old)
+		return Edit{}, fmt.Errorf("no image: line of %s says %s", service, old)
 	case 1:
 		return found[0], nil
 	}
-	return Edit{}, fmt.Errorf("%d image: lines say %s", len(found), old)
+	return Edit{}, fmt.Errorf("%d image: lines of %s say %s", len(found), service, old)
 }
 
 // fromEdits finds the FROM lines of a Dockerfile that start from old, or
@@ -72,6 +86,9 @@ func fromEdits(file, old, new string, exists func(ref string) bool) ([]Edit, err
 		case ref == old:
 			to = new
 		case len(ref) > len(old)+1 && strings.HasPrefix(ref, old+"-") && isLetter(ref[len(old)+1]):
+			if strings.Contains(ref, "@") {
+				return nil, fmt.Errorf("%s is pinned by digest", ref)
+			}
 			to = new + ref[len(old):]
 			if !exists(to) {
 				return nil, fmt.Errorf("%s does not exist", to)

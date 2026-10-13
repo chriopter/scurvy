@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -200,14 +199,9 @@ func (p Project) Key() string {
 	return strings.Join([]string{p.Name, p.Dir, strings.Join(p.Files, ","), strings.Join(p.EnvFiles, ",")}, "\x00")
 }
 
-// Args are the docker arguments that select the project. A project as
-// `docker compose` finds it by itself in its directory (named after it,
-// one compose file of a default name, no --env-file) needs none, and the
-// command run in its directory reads as one would type it.
+// Args are the docker arguments that select the project, as it was
+// started: its name, directory, compose files and env files.
 func (p Project) Args(sub ...string) []string {
-	if p.plain() {
-		return append([]string{"compose"}, sub...)
-	}
 	args := []string{"compose", "-p", p.Name}
 	if p.Dir != "" {
 		args = append(args, "--project-directory", p.Dir)
@@ -219,18 +213,6 @@ func (p Project) Args(sub ...string) []string {
 		args = append(args, "--env-file", f)
 	}
 	return append(args, sub...)
-}
-
-func (p Project) plain() bool {
-	if p.Dir == "" || len(p.Files) != 1 || len(p.EnvFiles) > 0 ||
-		filepath.Dir(p.Files[0]) != p.Dir || filepath.Base(p.Dir) != p.Name {
-		return false
-	}
-	switch filepath.Base(p.Files[0]) {
-	case "compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml":
-		return true
-	}
-	return false
 }
 
 // Service is a service as compose resolves it.
