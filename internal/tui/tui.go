@@ -341,7 +341,7 @@ func (m *Model) key(k string) tea.Cmd {
 		case m.updating, m.installing:
 			m.note = sDim.Render("one update at a time")
 		case len(todo) == 0:
-			m.note = sDim.Render("nothing scurvy can update here")
+			m.note = sDim.Render(whyNot(m.picked()))
 		default:
 			m.note = ""
 			m.confirm, m.noCache = true, k == "R"
@@ -487,4 +487,21 @@ func (w *lineWriter) flush() {
 		w.out <- w.partial.String()
 		w.partial.Reset()
 	}
+}
+
+// whyNot says why Enter does nothing on a row.
+func whyNot(r row, ok bool) string {
+	if !ok || len(r.items) == 0 {
+		return "nothing to update here"
+	}
+	it := r.items[0]
+	switch it.Source() {
+	case "external":
+		return name(r) + ": started by " + it.Project.Name + ", not from a compose file here; update it where it was started"
+	case "docker run":
+		return name(r) + ": started with docker run; update it by hand"
+	case "digest":
+		return name(r) + ": pinned by digest; change the digest in the compose file"
+	}
+	return name(r) + ": nothing scurvy can update here"
 }
