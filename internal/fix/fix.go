@@ -47,6 +47,7 @@ type Plan struct {
 	Edits   []scan.Edit
 	Pulls   []string // build contexts that are git clones, pulled first
 	NoCache bool     // build from scratch
+	AIO     bool     // Nextcloud All-in-One: its mastercontainer updates it
 }
 
 // Plans groups what to update by compose project. all is everything scan
@@ -58,10 +59,11 @@ func Plans(todo, all []scan.Item, noCache bool) (plans []Plan, refused []string)
 	var order []string
 	seen := map[string]bool{}
 	add := func(p *Plan, it scan.Item) {
-		if seen[it.Project.Key()+"\x00"+it.Service] {
+		id := it.Project.Key() + "\x00" + it.Name() // AIO's containers have no service: their name
+		if seen[id] {
 			return // another replica of a service already in the plan
 		}
-		seen[it.Project.Key()+"\x00"+it.Service] = true
+		seen[id] = true
 		p.Items = append(p.Items, it)
 		for _, e := range it.Edits {
 			if !hasEdit(p.Edits, e) {
@@ -80,7 +82,7 @@ func Plans(todo, all []scan.Item, noCache bool) (plans []Plan, refused []string)
 		key := it.Project.Key()
 		p := byKey[key]
 		if p == nil {
-			p = &Plan{Project: it.Project, Hook: it.Hook, NoCache: noCache}
+			p = &Plan{Project: it.Project, Hook: it.Hook, NoCache: noCache, AIO: it.Kind == scan.AIO}
 			byKey[key] = p
 			order = append(order, key)
 		}
@@ -88,7 +90,7 @@ func Plans(todo, all []scan.Item, noCache bool) (plans []Plan, refused []string)
 	}
 	for _, k := range order {
 		p := byKey[k]
-		if p.Hook != "" { // the script is in charge, of the whole project
+		if p.Hook != "" || p.AIO { // the script, or AIO, is in charge of the whole project
 			for _, it := range all {
 				if it.Project.Key() == k && it.Updatable() {
 					add(p, it)
@@ -170,6 +172,9 @@ func Run(ctx context.Context, p Plan, out io.Writer) error {
 }
 
 func run(r *runner, p Plan) error {
+	if p.AIO {
+		return runAIO(r, p)
+	}
 	if DryRun {
 		r.say("\033[33mdry run: changes shown, none made\033[0m")
 	} else {

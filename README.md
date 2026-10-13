@@ -38,6 +38,7 @@ Containers of one compose stack stand together. The right panel tells everything
 | build | a local Dockerfile | raises a fixed `FROM`, rebuilds, restarts |
 | build | a local Dockerfile in a git clone | `git pull`, rebuilds, restarts |
 | pinned digest | a registry, fixed digest (`@sha256:…`) | nothing |
+| aio | Nextcloud All-in-One | asks its mastercontainer to update all of AIO, with AIO's backup if set up |
 | external | another tool, or `docker run` | nothing |
 
 A stack with its own `docker-update.sh` gets that script run instead. Before every update the running image is kept as `<image>:bak-<time>`; after it, scurvy waits until the containers are healthy. [Details](docs/how.md)

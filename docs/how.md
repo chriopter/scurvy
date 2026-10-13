@@ -18,6 +18,8 @@
 5. `docker compose pull` or `build --pull` (`--no-cache` with <kbd>R</kbd>), or the stack's `docker-update.sh` instead; such a stack updates as a whole.
 6. `docker compose up -d --no-deps --pull never --no-build --wait`: only the planned containers, on exactly the images just made, running and healthy.
 
+**Nextcloud All-in-One** starts its containers itself and keeps their versions together, so scurvy never swaps them. Enter on one of them asks AIO's mastercontainer to update all of AIO, as AIO documents for scripts: `docker exec --env AUTOMATIC_UPDATES=1 [--env DAILY_BACKUP=1] nextcloud-aio-mastercontainer /daily-backup.sh`, with the backup if one is set up in AIO. When AIO renews its mastercontainer on the way, scurvy waits for it and runs the command once more, then waits until every AIO container is healthy. The way back is AIO's backup, not scurvy's.
+
 If a step fails, or the update is interrupted, scurvy puts back what it changed: the files, the git clones (only if nobody changed them since), the image tags, and, if it had touched them, the containers. What a `docker-update.sh` changed itself, it cannot know; it tells so.
 
 Volumes are never touched. Only old backup tags, dangling images and build cache are deleted.
