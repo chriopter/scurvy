@@ -196,7 +196,7 @@ func (s *scanner) pulled(ctx context.Context, it *Item) {
 	if !it.Updatable() {
 		return
 	}
-	e, err := imageEdit(it.Project.Files, it.Image, target.Name+":"+newer)
+	e, err := imageEdit(it.Project.Files, it.Service, it.Image, target.Name+":"+newer)
 	if err != nil {
 		it.add(OK, time.Time{}, "", "set %s by hand: %v", newer, err)
 		return
@@ -228,9 +228,9 @@ func (s *scanner) built(ctx context.Context, it *Item, svc docker.Service) {
 		return
 	}
 	clone := false
-	switch top, err := trusted(ctx, dir); {
+	switch top, err := Trusted(ctx, dir); {
 	case err != nil:
-		it.fail("git", err)
+		it.add(OK, time.Time{}, "", "git not asked: %v", err)
 	case top != "":
 		var moved bool
 		if clone, moved, err = upstream(ctx, dir, top); err != nil {
@@ -251,8 +251,12 @@ func (s *scanner) built(ctx context.Context, it *Item, svc docker.Service) {
 	if !filepath.IsAbs(file) {
 		file = filepath.Join(dir, file)
 	}
-	b, ok := baseOf(file, svc.Build.Args, svc.Build.Target)
-	if !ok {
+	b, err := baseOf(file, svc.Build.Args, svc.Build.Target)
+	switch {
+	case err != nil:
+		it.fail("base", err)
+		return
+	case b.ref == "": // FROM scratch: no base to check
 		return
 	}
 	ref := registry.Parse(b.ref)
@@ -270,7 +274,10 @@ func (s *scanner) built(ctx context.Context, it *Item, svc docker.Service) {
 			it.fail("base", err)
 			return
 		}
-		if published, err := s.reg.Created(ctx, ref, digest); err == nil && !built.IsZero() && published.After(built) {
+		published, err := s.reg.Created(ctx, ref, digest)
+		if err != nil {
+			it.fail("base", err)
+		} else if !built.IsZero() && published.After(built) {
 			it.add(s.level(published, it.due(dueBuild)), published, "new base image", "base %s has an image published after the build, %s", b.ref, s.ago(published, "published"))
 		}
 	}
@@ -309,7 +316,7 @@ func (s *scanner) baseVersion(ctx context.Context, it *Item, file string, b base
 		return
 	}
 	if own := registry.Parse(it.Image); own.Tag == ref.Tag {
-		e, err := imageEdit(it.Project.Files, it.Image, own.Name+":"+newer)
+		e, err := imageEdit(it.Project.Files, it.Service, it.Image, own.Name+":"+newer)
 		if err != nil {
 			it.add(OK, time.Time{}, "", "raise the base by hand: %v", err)
 			return

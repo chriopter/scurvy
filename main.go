@@ -20,15 +20,22 @@ import (
 
 var version = "dev"
 
+var (
+	rebuild bool // fix: build from scratch
+	influx  bool // list: as InfluxDB line protocol, for Telegraf
+)
+
 const usage = `scurvy: which of your containers have scurvy?
 
   scurvy            the containers by stack; Enter updates
-  scurvy list       the same as plain text
-  scurvy fix NAME   update one container, or all of a stack's
+  scurvy list       the update state of every container, as text
+  scurvy list --influx   the same as InfluxDB lines, for Telegraf
+  scurvy fix NAME   update one container (or stack/service), or a stack
   scurvy update     update scurvy itself
   scurvy version
 
-  -n, --dry-run     show every step of an update, run none
+  -n, --dry-run     show every change of an update, make none
+  --no-cache        fix: build from scratch
 
 Compose labels: scurvy.ignore=true leaves a container out,
 scurvy.due-after=7d sets how long its updates may wait.
@@ -37,11 +44,16 @@ scurvy.due-after=7d sets how long its updates may wait.
 func main() {
 	var args []string
 	for _, a := range os.Args[1:] {
-		if a == "--dry-run" || a == "-n" {
+		switch a {
+		case "--dry-run", "-n":
 			fix.DryRun = true
-			continue
+		case "--no-cache":
+			rebuild = true
+		case "--influx":
+			influx = true
+		default:
+			args = append(args, a)
 		}
-		args = append(args, a)
 	}
 	cmd := ""
 	if len(args) > 0 {
@@ -84,28 +96,63 @@ func list(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if influx {
+		fmt.Print(lineProtocol(items))
+		return nil
+	}
 	for _, it := range items {
-		state := it.Level.Word()
-		if it.Unchecked() {
-			state = "unchecked"
-		}
 		name := it.Name()
 		if it.Project.Name != "" && it.Project.Name != it.Service {
 			name = it.Project.Name + "/" + name
 		}
-		fmt.Printf("%-9s %-32s %-10s %s\n", state, name, it.Source(), it.Image)
+		fmt.Printf("%-16s %-32s %-10s %s\n", state(it), name, it.Source(), it.Image)
 		for _, f := range it.Findings {
-			fmt.Printf("          · %s\n", f.Text)
+			fmt.Printf("                 · %s\n", f.Text)
 		}
 		for _, e := range it.Errs {
-			fmt.Printf("          ? %s\n", e)
+			fmt.Printf("                 ? %s\n", e)
 		}
 	}
 	return nil
 }
 
-// fixNamed updates the container called NAME (its service or container
-// name), or all of a stack's that need it when NAME is a stack.
+// state is a container's state in the words of the screen.
+func state(it scan.Item) string {
+	if it.Unchecked() {
+		return "not checked"
+	}
+	return map[scan.Level]string{scan.OK: "up to date", scan.Update: "update available",
+		scan.Overdue: "update overdue", scan.EOL: "end of life"}[it.Level]
+}
+
+// lineProtocol is one InfluxDB line per container, for Telegraf's exec
+// input: tags stack, container, type; fields state, level (0 up to date …
+// 3 end of life, -1 not checked) and waiting_days.
+func lineProtocol(items []scan.Item) string {
+	tag := strings.NewReplacer(",", `\,`, " ", `\ `, "=", `\=`)
+	var b strings.Builder
+	for _, it := range items {
+		level := int(it.Level)
+		if it.Unchecked() {
+			level = -1
+		}
+		waiting := 0
+		if f, ok := it.Top(); ok && !f.Since.IsZero() {
+			waiting = int(time.Since(f.Since).Hours() / 24)
+		}
+		stack := it.Project.Name
+		if stack == "" {
+			stack = "-"
+		}
+		fmt.Fprintf(&b, "scurvy,stack=%s,container=%s,type=%s state=%q,level=%di,waiting_days=%di\n",
+			tag.Replace(stack), tag.Replace(it.Name()), tag.Replace(it.Source()), state(it), level, waiting)
+	}
+	return b.String()
+}
+
+// fixNamed updates what NAME names: a container (its service or container
+// name, or project/service when a name is not unique), or the containers
+// of a stack that need it.
 func fixNamed(ctx context.Context, args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: scurvy fix NAME")
@@ -114,23 +161,35 @@ func fixNamed(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	name := args[0]
 	var todo []scan.Item
 	for _, it := range items {
-		if it.Service == args[0] || it.Container.Name == args[0] {
+		if it.Service == name || it.Container.Name == name || it.Project.Name+"/"+it.Service == name {
 			todo = append(todo, it)
 		}
 	}
+	projects := map[string]bool{}
+	for _, it := range todo {
+		projects[it.Project.Name] = true
+	}
+	if len(projects) > 1 {
+		var names []string
+		for _, it := range todo {
+			names = append(names, it.Project.Name+"/"+it.Service)
+		}
+		return fmt.Errorf("%s is in more than one stack; say which: %s", name, strings.Join(names, ", "))
+	}
 	if len(todo) == 0 {
 		for _, it := range items {
-			if it.Project.Name == args[0] && it.Level > scan.OK {
+			if it.Project.Name == name && it.Level > scan.OK {
 				todo = append(todo, it)
 			}
 		}
 	}
 	if len(todo) == 0 {
-		return fmt.Errorf("no running container or stack with something to update called %s", args[0])
+		return fmt.Errorf("no running container or stack with something to update called %s", name)
 	}
-	plans, refused := fix.Plans(todo)
+	plans, refused := fix.Plans(todo, items, rebuild)
 	if len(refused) > 0 {
 		return errors.New(strings.Join(refused, "; "))
 	}

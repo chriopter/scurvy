@@ -49,7 +49,7 @@ func write(t *testing.T, name, text string) string {
 
 func TestBaseOf(t *testing.T) {
 	p := write(t, "Dockerfile", "FROM rust:latest AS tunnel\nRUN cargo build \\\n  --release\nFROM python:3.12-slim\nCOPY --from=tunnel /x /x\n")
-	if b, ok := baseOf(p, nil, ""); !ok || b.ref != "python:3.12-slim" {
+	if b, err := baseOf(p, nil, ""); err != nil || b.ref != "python:3.12-slim" {
 		t.Errorf("multi-stage: %+v", b)
 	}
 	p = write(t, "Dockerfile", "ARG PY=3.13\nFROM --platform=linux/amd64 python:${PY}-alpine AS base\nARG PY=9.9\nFROM base AS final\n")
@@ -64,11 +64,11 @@ func TestBaseOf(t *testing.T) {
 	if b, _ := baseOf(p, nil, "dev"); b.ref != "node:22" {
 		t.Errorf("target: %+v", b)
 	}
-	if _, ok := baseOf(p, nil, "missing"); ok {
+	if _, err := baseOf(p, nil, "missing"); err == nil {
 		t.Error("a missing target has no base")
 	}
-	if _, ok := baseOf(write(t, "Dockerfile", "FROM golang AS b\nFROM scratch\n"), nil, ""); ok {
-		t.Error("scratch has no base")
+	if b, err := baseOf(write(t, "Dockerfile", "FROM golang AS b\nFROM scratch\n"), nil, ""); err != nil || b.ref != "" {
+		t.Error("scratch has no base, and that is fine")
 	}
 }
 
@@ -100,15 +100,18 @@ func TestReleasesOf(t *testing.T) {
 
 func TestImageEdit(t *testing.T) {
 	p := write(t, "compose.yaml", "services:\n  a:\n    image: acme/app:1.2.11 # pinned\n  b:\n    image: \"ghcr.io/acme/app:1.2.11\"\n  c:\n    image: acme/app:1.2.111\n")
-	e, err := imageEdit([]string{p}, "acme/app:1.2.11", "acme/app:1.2.12")
+	e, err := imageEdit([]string{p}, "a", "acme/app:1.2.11", "acme/app:1.2.12")
 	if err != nil || e.Line != 3 || e.New != "    image: acme/app:1.2.12 # pinned" {
 		t.Fatalf("got %+v, %v", e, err)
 	}
-	q := write(t, "compose.yaml", "services:\n  a:\n    image: acme/app:1.0\n  b:\n    image: acme/app:1.0\n")
-	if _, err := imageEdit([]string{q}, "acme/app:1.0", "acme/app:1.1"); err == nil {
-		t.Error("two services on one image: which one is not certain")
+	q := write(t, "compose.yaml", "services:\n  db:\n    image: ${DB_IMAGE}\n  old:\n    image: postgres:16.4\n")
+	if _, err := imageEdit([]string{q}, "db", "postgres:16.4", "postgres:16.6"); err == nil {
+		t.Error("another service's line must not be edited for db")
 	}
-	if _, err := imageEdit([]string{p}, "acme/app:9", "x"); err == nil {
+	if e, err := imageEdit([]string{q}, "old", "postgres:16.4", "postgres:16.6"); err != nil || e.Line != 5 {
+		t.Errorf("the service's own line: %+v %v", e, err)
+	}
+	if _, err := imageEdit([]string{p}, "a", "acme/app:9", "x"); err == nil {
 		t.Error("no line, no edit")
 	}
 }
@@ -122,6 +125,10 @@ func TestFromEdits(t *testing.T) {
 	}
 	if _, err := fromEdits(p, "caddy:2.11.4", "caddy:2.11.7", func(string) bool { return false }); err == nil {
 		t.Error("a variant without its new tag moves nothing")
+	}
+	d := write(t, "Dockerfile", "FROM caddy:2.11.4-builder@sha256:abc AS b\nFROM caddy:2.11.4\n")
+	if _, err := fromEdits(d, "caddy:2.11.4", "caddy:2.11.7", all); err == nil {
+		t.Error("a variant pinned by digest moves nothing")
 	}
 }
 
