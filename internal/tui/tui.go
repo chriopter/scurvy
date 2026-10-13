@@ -7,6 +7,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -43,6 +44,7 @@ type Model struct {
 	done     *atomic.Int64 // scan progress, packed done<<32|total
 	err      error
 	confirm  bool   // asking whether to update the picked row
+	noCache  bool   // and to build from scratch (R)
 	note     string // a line about what just happened
 	width    int
 	height   int
@@ -84,6 +86,13 @@ type installedMsg struct {
 func Run(ctx context.Context, host, version string, dryRun bool) (string, error) {
 	m := &Model{ctx: ctx, host: host, version: version, dryRun: dryRun, all: true, done: new(atomic.Int64)}
 	_, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
+	if m.updating { // stopped from outside mid-update: let the core put things back
+		fmt.Println("an update was interrupted; scurvy puts back what it changed…")
+		for l := range m.lines {
+			fmt.Println(l)
+		}
+		<-m.result
+	}
 	return m.Restart, err
 }
 
@@ -272,8 +281,10 @@ func (m *Model) key(k string) tea.Cmd {
 		return nil
 	case m.confirm:
 		m.confirm = false
+		noCache := m.noCache
+		m.noCache = false
 		if todo, what := m.todo(); yes && len(todo) > 0 {
-			return m.startFix(todo, what)
+			return m.startFix(todo, what, noCache)
 		}
 		return nil
 	}
@@ -311,6 +322,8 @@ func (m *Model) key(k string) tea.Cmd {
 		case !update.Managed(m.version):
 			m.note = sDim.Render("this scurvy is a " + m.version + " build: it does not update itself")
 		case m.installing, m.checking:
+		case m.updating:
+			m.note = sDim.Render("scurvy updates itself once the containers are done")
 		case m.newer.Tag != "":
 			m.askSelf = true
 		default:
@@ -321,17 +334,17 @@ func (m *Model) key(k string) tea.Cmd {
 		if r, ok := m.picked(); ok && !m.updating {
 			m.toggle(r)
 		}
-	case "enter":
+	case "enter", "R":
 		todo, _ := m.todo()
 		switch {
 		case m.scanning:
-		case m.updating:
+		case m.updating, m.installing:
 			m.note = sDim.Render("one update at a time")
 		case len(todo) == 0:
 			m.note = sDim.Render("nothing scurvy can update here")
 		default:
 			m.note = ""
-			m.confirm = true
+			m.confirm, m.noCache = true, k == "R"
 		}
 	}
 	return nil
@@ -418,8 +431,8 @@ func name(r row) string {
 
 // startFix runs the update in the background and shows its output on the
 // right, line by line, while the list stays.
-func (m *Model) startFix(todo []scan.Item, what string) tea.Cmd {
-	plans, _ := fix.Plans(todo)
+func (m *Model) startFix(todo []scan.Item, what string, noCache bool) tea.Cmd {
+	plans, _ := fix.Plans(todo, m.items, noCache)
 	m.updating, m.logName, m.log, m.outcome = true, what, nil, ""
 	m.marked = nil
 	m.lines, m.result = make(chan string, 256), make(chan error, 1)

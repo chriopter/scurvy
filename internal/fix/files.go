@@ -19,9 +19,11 @@ type written struct {
 	before, after []byte
 }
 
-// edit makes the edits, file by file, and returns what to put back. Every
-// line must still say what scurvy read; a symlink or anything but a plain
-// file is left alone. Nothing is written until all edits check out.
+// edit makes the edits, file by file, and returns what it wrote, to put
+// back; with write false, what it would write. Every line must still say
+// what scurvy read; a symlink or anything but a plain file is left alone.
+// Nothing is written until all edits check out. If writing a file fails,
+// the ones written before come back with the error.
 func edit(edits []scan.Edit, write bool) ([]written, error) {
 	byFile := map[string][]scan.Edit{}
 	var order []string
@@ -58,8 +60,7 @@ func edit(edits []scan.Edit, write bool) ([]written, error) {
 	}
 	for i, w := range plan {
 		if err := replace(w.path, w.after); err != nil {
-			restore(plan[:i])
-			return nil, err
+			return plan[:i], err
 		}
 	}
 	return plan, nil

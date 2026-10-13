@@ -3,29 +3,23 @@
 ## Checks
 
 - **Moving tag** (`:latest`, `:release`, `:3.12-slim`): the registry's digest for the tag against the running image's.
-- **Version** (`:16.4`): the registry's tags for a newer one of the same major. A new major is a decision of its own and not offered.
-- **Own build**: the build's age, a newer image behind a moving `FROM`, a newer version of a pinned `FROM`, `git log` of the build context. A build context that is a git clone of its own is also checked against its remote (`git ls-remote`, nothing fetched). Git runs only in repositories owned by the user scurvy runs as.
+- **Fixed version** (`:16.4`): the registry's tags for a newer one of the same major. A new major is a decision of its own and not offered.
+- **Own build**: the build's age; a newer image behind a moving `FROM` (compared by date, the best that can be told); a newer version of a fixed `FROM`; `git log` of the build context. A build context that is a git clone of its own is also checked against its remote (`git ls-remote`, nothing fetched). Compose build args and targets are followed.
 - **Every container**: [endoflife.date](https://endoflife.date) for its base.
 - Docker Hub is asked through hub.docker.com, which does not count against its pull limit. Private images use the credentials of `docker login`.
+- git runs only in repositories whose files and config, includes too, belong to the user scurvy runs as and nobody else may change; never with hooks or a password prompt.
 
 ## Enter
 
-1. A lock: one update at a time.
-2. Every running image is kept as `<image>:bak-<time>`; the two newest stay.
-3. Version edits are made line by line, only if each line still says what scurvy read and only where exactly one line fits. `-builder` stages move along if their new tag exists.
-4. A clean git clone is pulled (`--ff-only`).
-5. `docker compose pull` or `build --pull`, or the stack's `docker-update.sh` instead.
-6. `docker compose up -d --wait`: the containers must run and be healthy.
-7. If any step fails: the files, the git clones, the images and the containers go back as they were.
+1. A lock (`/run/lock/scurvy.lock`): one update at a time on the machine.
+2. git clones to pull must be clean.
+3. Every planned container's running image is kept as `<image>:bak-<time>-<service>`; the two newest per service stay.
+4. git clones are pulled (`--ff-only`), then the version edits are made: line by line, only if each line still says what scurvy read, only in the service's own block, `-builder` stages along if their new tag exists.
+5. `docker compose pull` or `build --pull` (`--no-cache` with <kbd>R</kbd>), or the stack's `docker-update.sh` instead; such a stack updates as a whole.
+6. `docker compose up -d --no-deps --pull never --no-build --wait`: only the planned containers, on exactly the images just made, running and healthy.
+
+If a step fails, or the update is interrupted, scurvy puts back what it changed: the files, the git clones (only if nobody changed them since), the image tags, and, if it had touched them, the containers. What a `docker-update.sh` changed itself, it cannot know; it tells so.
 
 Volumes are never touched. Only old backup tags, dangling images and build cache are deleted.
-
-## More
-
-```sh
-scurvy list       # the same, as text
-scurvy fix web    # update one container, or a stack, without the screen
-scurvy update     # update scurvy itself
-```
 
 Compose labels: `scurvy.ignore: "true"` leaves a container out, `scurvy.due-after: "7d"` makes it overdue sooner.
