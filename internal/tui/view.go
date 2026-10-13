@@ -78,7 +78,7 @@ func (st state) style() lipgloss.Style { return lipgloss.NewStyle().Foreground(s
 func source(it scan.Item) (string, string) {
 	switch it.Source() {
 	case "own build":
-		return "⚒", "own build, from a Dockerfile"
+		return "◇", "own build, from a Dockerfile"
 	case "pinned":
 		return "#", "pinned version from a registry"
 	case "digest":
@@ -150,7 +150,7 @@ func fit(s string, n int) string {
 }
 
 func (m *Model) titleLine(w int) string {
-	left := lipgloss.NewStyle().Foreground(cInk).Background(cAccent).Bold(true).Padding(0, 1).Render("🍋 scurvy") +
+	left := lipgloss.NewStyle().Foreground(cInk).Background(cAccent).Bold(true).Padding(0, 1).Render("scurvy") +
 		sDim.Render("  "+m.host)
 	if n := len(m.items); n > 0 {
 		left += sFaint.Render("  ·  " + plural(n, "container"))
@@ -462,7 +462,7 @@ func details(r row) (string, []string) {
 			for _, it := range todo {
 				names = append(names, it.Name())
 			}
-			lines = append(lines, sAccent.Render("⏎")+" updates "+strings.Join(names, ", "), "")
+			lines = append(lines, sAccent.Render("↵")+" updates "+strings.Join(names, ", "), "")
 		}
 		for _, it := range r.items {
 			st := stateOf(it)
@@ -495,7 +495,7 @@ func details(r row) (string, []string) {
 		lines = append(lines, sOK.Render("✓")+" nothing newer found")
 	}
 	if it.Updatable() {
-		lines = append(lines, "", sAccent.Render("⏎")+" "+plan(it))
+		lines = append(lines, "", sAccent.Render("↵")+" "+plan(it))
 		for _, e := range it.Edits {
 			lines = append(lines, sFaint.Render("  "+filepath.Base(e.File)+":")+" "+sErr.Render(strings.TrimSpace(e.Old))+
 				sFaint.Render(" → ")+sOK.Render(strings.TrimSpace(e.New)))
