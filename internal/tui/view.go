@@ -277,13 +277,13 @@ func (m *Model) columns(rows []row, inner int) cols {
 			c.kind = max(c.kind, min(lipgloss.Width(kindWord(r.items[0])), 18))
 		}
 	}
-	c.name = min(c.name, max(8, inner-2-c.state-c.kind-waitW-6))
+	c.name = min(c.name, max(8, inner-4-c.state-c.kind-waitW-6))
 	return c
 }
 
 // header names the columns, as k9s and docker ps do.
 func (c cols) header(inner int) string {
-	h := "  " + fit("CONTAINER", c.name) + "  " + fit("STATE", c.state) + "  " + fit("TYPE", c.kind) + "  " + fmt.Sprintf("%*s", waitW, "WAIT")
+	h := "    " + fit("CONTAINER", c.name) + "  " + fit("STATE", c.state) + "  " + fit("TYPE", c.kind) + "  " + fmt.Sprintf("%*s", waitW, "WAIT")
 	return lipgloss.NewStyle().Foreground(cDim).Bold(true).Render(fit(h, inner))
 }
 
@@ -325,7 +325,7 @@ func (m *Model) line(r row, picked bool, c cols, inner int) string {
 			}
 		}
 		head := on(sBold).Render(title)
-		rule := on(sFaint).Render(" " + strings.Repeat("─", max(1, c.name+2-lipgloss.Width(head))) + " ")
+		rule := on(sFaint).Render(" " + strings.Repeat("─", max(1, c.name+4-lipgloss.Width(head))) + " ")
 		line := head + rule + on(worst.style()).Render(worst.word) + on(sFaint).Render(" ")
 		return line + on(sFaint).Render(strings.Repeat("─", max(0, inner-lipgloss.Width(line))))
 	}
@@ -336,11 +336,18 @@ func (m *Model) line(r row, picked bool, c cols, inner int) string {
 		waiting = fmt.Sprintf("%dd", int(time.Since(f.Since).Hours()/24))
 	}
 	gap := on(lipgloss.NewStyle()).Render("  ")
+	dot := on(lipgloss.NewStyle().Foreground(cCurrent)).Render("● ")
+	switch {
+	case it.Container.Failed:
+		dot = on(lipgloss.NewStyle().Foreground(cEOL)).Render("● ")
+	case !it.Up():
+		dot = on(sFaint).Render("○ ")
+	}
 	mark := on(lipgloss.NewStyle()).Render("  ")
 	if m.marked[it.Container.ID] {
 		mark = on(lipgloss.NewStyle().Foreground(cActive).Bold(true)).Render("* ")
 	}
-	line := mark + cellOn(on(sText).Render(short(it, r.group)), c.name, on) + gap +
+	line := mark + dot + cellOn(on(sText).Render(short(it, r.group)), c.name, on) + gap +
 		cellOn(on(st.style()).Render(st.word), c.state, on) + gap +
 		cellOn(on(sDim).Render(kindWord(it)), c.kind, on) + gap +
 		on(st.style()).Render(fmt.Sprintf("%*s", waitW, waiting))

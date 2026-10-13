@@ -388,6 +388,10 @@ func (m *Model) key(k string) tea.Cmd {
 		}
 	case "enter", "R":
 		todo, _ := m.todo()
+		// A new major is a decision: Enter on it opens the version choice.
+		if len(todo) == 1 && len(m.marked) == 0 && todo[0].Major != "" && len(todo[0].Edits) == 0 && k == "enter" {
+			return m.key("e")
+		}
 		switch {
 		case m.scanning:
 		case m.updating, m.installing:
@@ -547,6 +551,9 @@ func whyNot(r row, ok bool) string {
 		return "nothing to update here"
 	}
 	it := r.items[0]
+	if !it.Up() {
+		return name(r) + ": it is " + it.Container.State + "; scurvy does not start it"
+	}
 	switch it.Source() {
 	case "external":
 		return name(r) + ": started by " + it.Project.Name + ", not from a compose file here; update it where it was started"

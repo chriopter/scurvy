@@ -67,6 +67,7 @@ type Item struct {
 	Edits []Edit // exact lines to change before updating: a raised version
 	Pull  string // a build context that is a git clone behind its upstream
 	Hook  string // the stack's own update script, if any
+	Major string // a later major version of a pinned image: offered, never taken by itself
 }
 
 // Finding is one thing found, with its weight.
@@ -85,11 +86,15 @@ func (it Item) Name() string {
 	return it.Container.Name
 }
 
-// Updatable reports whether Enter can update it: compose knows how, and no
-// digest pins it.
+// Updatable reports whether Enter can update it: it runs, compose knows
+// how, and no digest pins it.
 func (it Item) Updatable() bool {
-	return it.Kind != Loose && it.Project.Name != "" && registry.Parse(it.Image).Digest == ""
+	return it.Kind != Loose && it.Project.Name != "" && registry.Parse(it.Image).Digest == "" && it.Up()
 }
+
+// Up reports whether the container runs; a stopped one is shown, not
+// updated, so an update never starts what was meant to be off.
+func (it Item) Up() bool { return it.Container.State == "" || it.Container.State == "running" }
 
 // Unchecked reports a container nothing could be found about, because a
 // check failed.

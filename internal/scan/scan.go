@@ -35,10 +35,10 @@ type scanner struct {
 	now    time.Time
 }
 
-// Scan checks every running container. progress, if set, hears how many
+// Scan checks every container, running or not. progress, if set, hears how many
 // of how many are done.
 func Scan(ctx context.Context, progress func(done, total int)) ([]Item, error) {
-	cs, err := docker.Running(ctx)
+	cs, err := docker.All(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +200,16 @@ func (s *scanner) pulled(ctx context.Context, it *Item) {
 		it.fail("versions", err)
 		return
 	}
-	newer := newerTag(tags, target.Tag)
+	recent, err := s.reg.RecentTags(ctx, target)
+	if err != nil {
+		it.fail("versions", err)
+	}
+	newer, major := newerTag(append(tags, recent...), target.Tag)
+	if major != "" {
+		released, _ := s.reg.Created(ctx, target, major)
+		it.Major = major
+		it.add(Update, released, "new major "+major, "a new major version %s is out, %s; e pins to it", major, s.ago(released, "released"))
+	}
 	if newer == "" {
 		return
 	}
@@ -305,7 +314,7 @@ func (s *scanner) baseVersion(ctx context.Context, it *Item, file string, b base
 		it.fail("versions", err)
 		return
 	}
-	newer := newerTag(tags, ref.Tag)
+	newer, _ := newerTag(tags, ref.Tag)
 	if newer == "" {
 		return
 	}

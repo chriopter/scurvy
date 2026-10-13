@@ -12,15 +12,18 @@ import (
 )
 
 func TestNewerTag(t *testing.T) {
-	tags := []string{"10.11.11", "10.11.12", "10.12.0", "11.0.0", "10.12.0-rc1", "latest", "2025111705", "v10.13.0", "10.11"}
-	if got := newerTag(tags, "10.11.11"); got != "10.12.0" {
-		t.Errorf("got %q", got)
+	tags := []string{"10.11.11", "10.11.12", "10.12.0", "11.0.0", "12.2", "10.12.0-rc1", "latest", "2025111705", "v10.13.0", "10.11"}
+	if minor, major := newerTag(tags, "10.11.11"); minor != "10.12.0" || major != "12.2" {
+		t.Errorf("got %q %q", minor, major)
 	}
-	if got := newerTag(tags, "10.12.0"); got != "" {
-		t.Errorf("nothing newer in 10.x, got %q", got)
+	if minor, _ := newerTag(tags, "10.12.0"); minor != "" {
+		t.Errorf("nothing newer in 10.x, got %q", minor)
 	}
-	if got := newerTag([]string{"3.19", "3.24", "3.9", "3.24.1"}, "3.19"); got != "3.24" {
-		t.Errorf("alpine: got %q", got)
+	if minor, _ := newerTag([]string{"3.19", "3.24", "3.9", "3.24.1"}, "3.19"); minor != "3.24.1" {
+		t.Errorf("alpine: got %q", minor)
+	}
+	if !less(numbers("12.2"), numbers("12.2.1")) || less(numbers("12.2"), numbers("12.2.0")) {
+		t.Error("12.2 is 12.2.0")
 	}
 }
 

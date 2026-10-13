@@ -63,7 +63,7 @@ For Grafana, let Telegraf ask every few hours; each run asks the registries:
   data_format = "influx"
 ```
 
-Each container becomes a point `scurvy,stack=…,container=…,type=…` with `state`, `level` (0 up to date, 1 available, 2 overdue, 3 end of life, -1 not checked) and `waiting_days`.
+Each container becomes a point `scurvy,stack=…,container=…,type=…` with `state`, `level` (0 up to date, 1 available, 2 overdue, 3 end of life, -1 not checked), `waiting_days` and `running` (1 or 0).
 
 ## Development
 

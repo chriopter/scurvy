@@ -105,6 +105,8 @@ func Plans(todo, all []scan.Item, noCache bool) (plans []Plan, refused []string)
 
 func whyNot(it scan.Item) string {
 	switch {
+	case !it.Up():
+		return "it is " + it.Container.State + ": start it first"
 	case it.Kind == scan.Loose && it.Project.Name != "":
 		return "started by " + it.Project.Name + ", not from a compose file here"
 	case it.Kind == scan.Loose:
