@@ -129,6 +129,9 @@ func (c *Client) remember(key string, fn func() (any, error)) (any, error) {
 // Digest is what the tag points to now: the digest of its index (or of its
 // manifest, for single-platform images), as docker records in RepoDigests.
 func (c *Client) Digest(ctx context.Context, r Ref) (string, error) {
+	if t, err := c.hubTag(ctx, r, r.Tag); err == nil && t.Digest != "" {
+		return t.Digest, nil
+	}
 	v, err := c.remember("digest "+r.Host+"/"+r.Repo+":"+r.Tag, func() (any, error) {
 		resp, err := c.do(ctx, http.MethodHead, r, "/manifests/"+r.Tag, manifestTypes)
 		if err != nil {
@@ -159,7 +162,19 @@ func (c *Client) Digest(ctx context.Context, r Ref) (string, error) {
 
 // Created is when the image behind reference (a tag or a digest) was
 // built, for this machine's platform: the "created" of its config.
+//
+// On Docker Hub it is when the tag was last pushed instead, which Docker
+// Hub tells without counting a pull; reference is then the tag's current
+// digest or a tag.
 func (c *Client) Created(ctx context.Context, r Ref, reference string) (time.Time, error) {
+	tag := reference
+	if strings.HasPrefix(reference, "sha256:") {
+		tag = r.Tag
+	}
+	if t, err := c.hubTag(ctx, r, tag); err == nil && !t.Pushed.IsZero() &&
+		(tag == reference || t.Digest == reference) {
+		return t.Pushed, nil
+	}
 	v, err := c.remember("created "+r.Host+"/"+r.Repo+"@"+reference, func() (any, error) {
 		var m struct {
 			Manifests []struct {
@@ -207,8 +222,12 @@ func (c *Client) Created(ctx context.Context, r Ref, reference string) (time.Tim
 	return t, err
 }
 
-// Tags lists the repository's tags, following pages.
-func (c *Client) Tags(ctx context.Context, r Ref) ([]string, error) {
+// Tags lists the repository's tags, following pages. On Docker Hub only
+// the tags that contain like (empty: all) are asked for, to spare its limit.
+func (c *Client) Tags(ctx context.Context, r Ref, like string) ([]string, error) {
+	if tags, err := c.hubTags(ctx, r, like); err == nil {
+		return tags, nil
+	}
 	v, err := c.remember("tags "+r.Host+"/"+r.Repo, func() (any, error) {
 		var all []string
 		path := "/tags/list?n=1000"
@@ -299,6 +318,10 @@ func (c *Client) do(ctx context.Context, method string, r Ref, path, accept stri
 			c.tokens[key] = token
 			c.mu.Unlock()
 			continue
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
+			return nil, fmt.Errorf("%s: rate limited, try again later", loginHost(r.Host))
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
@@ -433,4 +456,89 @@ func loginHost(host string) string {
 		return "docker.io"
 	}
 	return host
+}
+
+// hubTag is what Docker Hub's own API says about a tag: its digest and
+// when it was last pushed. It does not count against Docker Hub's pull
+// limit, unlike asking the registry for a manifest.
+type hubTag struct {
+	Digest string
+	Pushed time.Time
+}
+
+const hubAPI = "https://hub.docker.com/v2/namespaces/"
+
+func hubRepo(r Ref) (namespace, name string, ok bool) {
+	if r.Host != "registry-1.docker.io" {
+		return "", "", false
+	}
+	return strings.Cut(r.Repo, "/")
+}
+
+func (c *Client) hubTag(ctx context.Context, r Ref, tag string) (hubTag, error) {
+	ns, name, ok := hubRepo(r)
+	if !ok || tag == "" {
+		return hubTag{}, errors.New("not on Docker Hub")
+	}
+	v, err := c.remember("hub "+r.Repo+":"+tag, func() (any, error) {
+		var t struct {
+			Digest string `json:"digest"`
+			Pushed string `json:"tag_last_pushed"`
+		}
+		if err := c.hubGet(ctx, hubAPI+ns+"/repositories/"+name+"/tags/"+url.PathEscape(tag), &t); err != nil {
+			return hubTag{}, err
+		}
+		return hubTag{Digest: t.Digest, Pushed: ParseTime(t.Pushed)}, nil
+	})
+	t, _ := v.(hubTag)
+	return t, err
+}
+
+func (c *Client) hubTags(ctx context.Context, r Ref, like string) ([]string, error) {
+	ns, name, ok := hubRepo(r)
+	if !ok {
+		return nil, errors.New("not on Docker Hub")
+	}
+	v, err := c.remember("hubtags "+r.Repo+"~"+like, func() (any, error) {
+		next := hubAPI + ns + "/repositories/" + name + "/tags?page_size=100"
+		if like != "" {
+			next += "&name=" + url.QueryEscape(like)
+		}
+		var all []string
+		for page := 0; next != "" && page < 20; page++ {
+			var list struct {
+				Next    string `json:"next"`
+				Results []struct {
+					Name string `json:"name"`
+				} `json:"results"`
+			}
+			if err := c.hubGet(ctx, next, &list); err != nil {
+				return nil, err
+			}
+			for _, t := range list.Results {
+				all = append(all, t.Name)
+			}
+			next = list.Next
+		}
+		return all, nil
+	})
+	tags, _ := v.([]string)
+	return tags, err
+}
+
+func (c *Client) hubGet(ctx context.Context, u string, v any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "scurvy")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("hub.docker.com: %s", resp.Status)
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(v)
 }

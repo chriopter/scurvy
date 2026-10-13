@@ -3,6 +3,7 @@ package scan
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,5 +136,30 @@ func TestDue(t *testing.T) {
 func TestDays(t *testing.T) {
 	if Days(time.Hour) != "today" || Days(30*time.Hour) != "1 day" || Days(50*24*time.Hour) != "50 days" {
 		t.Error("days")
+	}
+}
+
+func TestBumpVariants(t *testing.T) {
+	dir := t.TempDir()
+	df := filepath.Join(dir, "Dockerfile")
+	os.WriteFile(df, []byte("FROM caddy:2.11.4-builder AS builder\nRUN xcaddy build\nFROM caddy:2.11.4\nCOPY --from=builder /x /x\n"), 0o644)
+	cf := filepath.Join(dir, "docker-compose.yml")
+	os.WriteFile(cf, []byte("services:\n  caddy:\n    build: .\n    image: caddy-custom:2.11.4\n"), 0o644)
+	b := findBump([]string{df}, "caddy:2.11.4", "caddy:2.11.7")
+	b.Then = findBump([]string{cf}, "caddy-custom:2.11.4", "caddy-custom:2.11.7")
+	if _, err := b.All(true); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := os.ReadFile(df)
+	c, _ := os.ReadFile(cf)
+	if string(d) != "FROM caddy:2.11.7-builder AS builder\nRUN xcaddy build\nFROM caddy:2.11.7\nCOPY --from=builder /x /x\n" {
+		t.Errorf("Dockerfile:\n%s", d)
+	}
+	if !strings.Contains(string(c), "image: caddy-custom:2.11.7") {
+		t.Errorf("compose:\n%s", c)
+	}
+	b.UndoAll()
+	if d, _ := os.ReadFile(df); !strings.Contains(string(d), "caddy:2.11.4-builder") {
+		t.Errorf("undo:\n%s", d)
 	}
 }

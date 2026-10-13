@@ -93,8 +93,12 @@ const (
 
 func (m *Model) columns(inner int) cols {
 	c := cols{name: 10, version: 7}
-	for _, it := range m.items {
-		c.name = max(c.name, len([]rune(it.Name())))
+	for _, r := range m.rows() {
+		if r.head {
+			continue
+		}
+		it := r.items[0]
+		c.name = max(c.name, lipgloss.Width(short(it, r.group)))
 		cur, next := version(it)
 		w := lipgloss.Width(cur)
 		if next != "" {
@@ -158,6 +162,9 @@ func (m *Model) titleLine(w int) string {
 		sDim.Render("  "+m.host)
 	if n := len(m.items); n > 0 {
 		left += sFaint.Render("  ·  " + plural(n, "container"))
+	}
+	if m.dryRun {
+		left += "  " + lipgloss.NewStyle().Foreground(cInk).Background(cOverdue).Bold(true).Padding(0, 1).Render("DRY RUN")
 	}
 	if m.newer.Tag == "" {
 		return left
@@ -282,6 +289,9 @@ func (m *Model) line(rows []row, i int, c cols, inner int) string {
 	sign, _ := source(it)
 	blank := on(lipgloss.NewStyle())
 	nameStyle := on(lipgloss.NewStyle().Foreground(cText))
+	if it.Kind == scan.Loose {
+		nameStyle = on(sDim) // not ours to update
+	}
 	if picked {
 		nameStyle = nameStyle.Bold(true)
 	}
@@ -310,10 +320,10 @@ func (m *Model) line(rows []row, i int, c cols, inner int) string {
 			age = days(time.Since(f.Since))
 		}
 	} else if it.Err != "" {
-		what = "not checked: " + it.Err
+		what = brief(it.Err)
 	}
 	g := blank.Render(sp())
-	return cursor + on(st.style().Bold(true)).Render(st.sign+" ") + nameStyle.Render(pad(it.Name(), c.name)) + g +
+	return cursor + on(st.style().Bold(true)).Render(st.sign+" ") + nameStyle.Render(pad(short(it, r.group), c.name)) + g +
 		srcStyle.Render(sign) + g + ver + g + on(st.style()).Render(padLeft(age, ageW)) + g +
 		on(lipgloss.NewStyle().Foreground(cText)).Render(pad(what, c.what))
 }
@@ -357,11 +367,10 @@ func (m *Model) header(r row, width int, on func(lipgloss.Style) lipgloss.Style)
 	if r.group == "" {
 		nameStyle = on(sDim.Bold(true))
 	}
-	left := on(sFaint).Render("── ") + nameStyle.Render(title) + on(lipgloss.NewStyle()).Render(" ")
-	right := on(lipgloss.NewStyle()).Render(" ") + on(stateOf(worst, worst == scan.OK && unchecked > 0).style()).Render(strings.Join(parts, " · ")) +
-		on(sFaint).Render(" ──")
-	fill := max(2, width-lipgloss.Width(left)-lipgloss.Width(right))
-	return left + on(sFaint).Render(strings.Repeat("─", fill)) + right
+	head := on(sFaint).Render("── ") + nameStyle.Render(title) + on(lipgloss.NewStyle()).Render("  ") +
+		on(stateOf(worst, worst == scan.OK && unchecked > 0).style()).Render(strings.Join(parts, " · ")) +
+		on(lipgloss.NewStyle()).Render(" ")
+	return head + on(sFaint).Render(strings.Repeat("─", max(2, width-lipgloss.Width(head))))
 }
 
 // detail is the panel under the table: everything about the picked row.
@@ -405,7 +414,7 @@ func (m *Model) detail(r row, w, h int) string {
 			lines = append(lines, mark+" "+f.Text)
 		}
 		if it.Err != "" {
-			lines = append(lines, sDim.Render("? not checked: "+it.Err))
+			lines = append(lines, sDim.Render("? "+brief(it.Err)+": "+it.Err))
 		}
 		switch {
 		case !it.Updatable():
@@ -436,6 +445,31 @@ func (m *Model) detail(r row, w, h int) string {
 		body = append(body, ansi.Truncate(l, iw, "…"))
 	}
 	return box.Render(strings.Join(body, "\n"))
+}
+
+// short is a container's name in its section: nextcloud-aio-apache is
+// apache under nextcloud-aio.
+func short(it scan.Item, section string) string {
+	n := it.Name()
+	for _, sep := range []string{"-", "_"} {
+		if rest, ok := strings.CutPrefix(n, section+sep); ok && section != "" && rest != "" {
+			return rest
+		}
+	}
+	return n
+}
+
+// brief says why something could not be checked, in a few words.
+func brief(err string) string {
+	switch {
+	case strings.Contains(err, "rate limited"):
+		return "rate limited, try later"
+	case strings.Contains(err, "docker login"):
+		return "private image: needs docker login"
+	case strings.Contains(err, "no such host"), strings.Contains(err, "timeout"), strings.Contains(err, "deadline"):
+		return "registry not reachable"
+	}
+	return "not checked"
 }
 
 func verb(it scan.Item) string {

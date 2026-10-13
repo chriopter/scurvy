@@ -21,11 +21,15 @@ import (
 
 var version = "dev"
 
+// dryRunEnv hands --dry-run on to `scurvy fix` started from the screen.
+const dryRunEnv = "SCURVY_DRY_RUN"
+
 const usage = `scurvy: which of your containers have scurvy?
 
-  scurvy            the crew, sickest first; Enter updates one
+  scurvy            the containers by stack; Enter updates
+  scurvy -n         the same, but Enter only shows what it would run
   scurvy list       the same as plain text
-  scurvy fix NAME   update one container (service or container name)
+  scurvy fix NAME   update one container (service or container name); -n shows only
   scurvy update     update scurvy itself
   scurvy version
 
@@ -34,7 +38,20 @@ scurvy.due-after=7d sets how long its updates may wait.
 `
 
 func main() {
-	args := os.Args[1:]
+	var args []string
+	for _, a := range os.Args[1:] {
+		if a == "--dry-run" || a == "-n" {
+			fix.DryRun = true
+			continue
+		}
+		args = append(args, a)
+	}
+	if os.Getenv(dryRunEnv) == "1" {
+		fix.DryRun = true
+	}
+	if fix.DryRun {
+		os.Setenv(dryRunEnv, "1") // for `scurvy fix` started from the screen
+	}
 	cmd := ""
 	if len(args) > 0 {
 		cmd = args[0]
@@ -43,7 +60,7 @@ func main() {
 	switch cmd {
 	case "":
 		var restart string
-		if restart, err = tui.Run(version); err == nil && restart != "" {
+		if restart, err = tui.Run(version, fix.DryRun); err == nil && restart != "" {
 			fmt.Println("scurvy updated itself (signature checked); starting it again")
 			err = syscall.Exec(restart, os.Args, os.Environ())
 		}
@@ -61,11 +78,17 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
+	if errors.Is(err, errShown) {
+		os.Exit(1)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scurvy:", err)
 		os.Exit(1)
 	}
 }
+
+// errShown is a failure already told on screen.
+var errShown = errors.New("shown")
 
 func list() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -138,6 +161,10 @@ func fixOne(args []string) error {
 			fmt.Println()
 		}
 		rollback, err := fix.Run(ctx, it, os.Stdout)
+		if err == nil && fix.DryRun {
+			fmt.Printf("\n\033[33m· dry run: nothing was changed\033[0m\n")
+			continue
+		}
 		if err == nil {
 			fmt.Printf("\n\033[32m✓ %s is shipshape again\033[0m\n", it.Name())
 			fmt.Printf("\033[2m  if it misbehaves: %s\033[0m\n", rollback)
@@ -150,6 +177,9 @@ func fixOne(args []string) error {
 		}
 	}
 	err := failed
+	if err != nil {
+		err = errShown
+	}
 	if fromScreen {
 		fmt.Print("\n\033[2mpress enter to go back\033[0m")
 		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')

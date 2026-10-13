@@ -18,6 +18,10 @@ import (
 	"github.com/chriopter/scurvy/internal/scan"
 )
 
+// DryRun shows every step and runs none: no file is written, no image
+// tagged, pulled or built, no container recreated.
+var DryRun bool
+
 // keep is how many backup tags stay per image. Scripts that tag
 // bak-<time> themselves can use the same names.
 const keep = 2
@@ -33,7 +37,11 @@ func Run(ctx context.Context, it scan.Item, out io.Writer) (rollback string, err
 	if it.Kind == scan.Pulled && ref.Digest != "" && ref.Tag == "" {
 		return "", fmt.Errorf("%s is pinned by digest; change the digest in the compose file", it.Name())
 	}
-	fmt.Fprintf(out, "🍋 prescribing limes to %s\n\n", it.Name())
+	if DryRun {
+		fmt.Fprintf(out, "🍋 prescribing limes to %s \033[33m(dry run: shown, not run)\033[0m\n\n", it.Name())
+	} else {
+		fmt.Fprintf(out, "🍋 prescribing limes to %s\n\n", it.Name())
+	}
 
 	// A build context that is a git clone first takes its upstream, so a
 	// version raised below lands on the newest code.
@@ -43,21 +51,22 @@ func Run(ctx context.Context, it scan.Item, out io.Writer) (rollback string, err
 		}
 	}
 	if it.Bump != nil {
-		before, after, err := it.Bump.Apply()
+		changes, err := it.Bump.All(!DryRun)
 		if err != nil {
 			return "", err
 		}
-		fmt.Fprintf(out, "  %s\n", it.Bump.File)
-		for i := range before {
-			fmt.Fprintf(out, "  - %s\n  + %s\n", strings.TrimSpace(before[i]), strings.TrimSpace(after[i]))
+		for _, c := range changes {
+			fmt.Fprintf(out, "  %s\n", c.File)
+			for i := range c.Before {
+				fmt.Fprintf(out, "  \033[31m- %s\033[0m\n  \033[32m+ %s\033[0m\n", strings.TrimSpace(c.Before[i]), strings.TrimSpace(c.After[i]))
+			}
 		}
 		fmt.Fprintln(out)
 	}
 	undo := func(err error) (string, error) {
-		if it.Bump != nil {
-			if uerr := it.Bump.Undo(); uerr == nil {
-				fmt.Fprintf(out, "\n  put %s back in %s\n", it.Bump.Old, it.Bump.File)
-			}
+		if it.Bump != nil && !DryRun {
+			it.Bump.UndoAll()
+			fmt.Fprintf(out, "\n  put %s back\n", it.Bump.Old)
 		}
 		return "", err
 	}
@@ -73,6 +82,7 @@ func Run(ctx context.Context, it scan.Item, out io.Writer) (rollback string, err
 	switch {
 	case it.Hook != "":
 		// The stack brings its own way to update; it knows best.
+		fmt.Fprintf(out, "\033[2m$ cd %s\033[0m\n", p.Dir)
 		if err := run(ctx, out, p.Dir, "bash", scan.HookFile); err != nil {
 			return undo(err)
 		}
@@ -118,6 +128,9 @@ const buildCache = "10GB"
 // run runs any command where the user can watch it.
 func run(ctx context.Context, out io.Writer, dir, name string, args ...string) error {
 	fmt.Fprintf(out, "\033[2m$ %s %s\033[0m\n", name, strings.Join(quote(args), " "))
+	if DryRun {
+		return nil
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = out, out
@@ -134,6 +147,9 @@ func step(ctx context.Context, out io.Writer, dir string, show []string, args ..
 		show = args
 	}
 	fmt.Fprintf(out, "\033[2m$ docker %s\033[0m\n", strings.Join(quote(show), " "))
+	if DryRun {
+		return nil
+	}
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = out, out
@@ -158,6 +174,9 @@ func plain(p docker.Project) bool {
 
 // prune removes all but the newest backup tags of an image.
 func prune(ctx context.Context, name string) {
+	if DryRun {
+		return
+	}
 	out, err := exec.CommandContext(ctx, "docker", "images", name, "--format", "{{.Tag}}").Output()
 	if err != nil {
 		return
